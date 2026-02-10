@@ -1,23 +1,13 @@
 """
-DNSSEC Checking Tool (convenience layer)
-
-This module provides:
+DNSSEC Checking Tool provides:
 - Recommendations
 - Reporting -> pandas DataFrame
 - Analytics + plotting
-
-It delegates scanning semantics to dnssec_scanner.DnssecScanner (single source of truth).
 """
-
-from __future__ import annotations
 
 from typing import Dict, List, Tuple, Any, Optional
 import pandas as pd
-
-try:
-    import matplotlib.pyplot as plt  # type: ignore
-except Exception:  # pragma: no cover
-    plt = None  # type: ignore
+import matplotlib.pyplot as plt 
 
 from dnssec_scanner import DnssecScanner
 from dnssec_models import Finding, ZoneResult
@@ -84,8 +74,6 @@ class Recommendations:
 # ============================================================
 
 class Reporter:
-    """Convert scan results into a flat pandas DataFrame."""
-
     def __init__(self, scanner: DnssecScanner):
         self.scanner = scanner
 

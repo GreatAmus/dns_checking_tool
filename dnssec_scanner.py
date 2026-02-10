@@ -193,16 +193,15 @@ class DnssecScanner:
         findings: List[Finding] = []
 
         out = self.dig_dnssec_sections_tcp(server, zone, "DNSKEY")
-        low = out.lower()
 
-        fail = self._looks_like_query_failure(out)
-        if fail:
+        # DS exists => DNSKEY expected
+        if not re.search(r"\bDNSKEY\b", out, flags=re.IGNORECASE):
             findings.append(
                 Finding(
                     zone=zone,
                     server=server,
-                    issue=fail,
-                    repro=f"dig +dnssec +tcp @{server} {zone} DNSKEY +norecurse +noall +answer +authority",
+                    issue="DNSKEY_NODATA",
+                    repro=f"dig +dnssec +tcp @{server} {zone} DNSKEY +norecurse +noall +answer +authority +comments",
                     detail_tail="\n".join(out.splitlines()[-60:]),
                 )
             )

@@ -11,8 +11,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-from dnssec_tool import DNSSECTool, Analytics  # from your existing module
+from dnssec_tool import DNSSECTool, Analytics, Recommendations
 
 app = FastAPI(title="DNS Settings Checker")
 tool = DNSSECTool(timeout=15)
@@ -37,12 +36,13 @@ def check(zone: str = Query(..., min_length=1, max_length=253)):
     if not zone or any(c.isspace() for c in zone):
         raise HTTPException(status_code=400, detail="Invalid zone")
 
-    result = tool.scan_zone(zone)
+    zr = tool.scan_zone(zone)
 
-    # Ensure whatever ZoneResult is (Pydantic model / dataclass / custom object)
-    # becomes JSON-safe for FastAPI to return.
-    return JSONResponse(content=jsonable_encoder(result))
+    payload = zr.to_dict()  # ZoneResult dataclass has to_dict()
+    for f in payload.get("findings", []):
+        f["recommendation"] = Recommendations.recommend(f.get("issue", ""))
 
+    return jsonable_encoder(payload)
 
 def plot_analytics_2x2_to_png(
     a: Dict[str, pd.DataFrame],
