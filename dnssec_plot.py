@@ -11,63 +11,7 @@ import matplotlib.pyplot as plt
 
 from dnssec_scanner import DnssecScanner
 from dnssec_models import Finding, ZoneResult
-
-
-# ============================================================
-# Recommendations
-# ============================================================
-
-class Recommendations:
-    """Human-readable recommendations keyed by issue code."""
-
-    @staticmethod
-    def recommend(issue: str) -> str:
-        issue = (issue or "").upper()
-
-        if issue == "DNSSEC_BOGUS":
-            return (
-                "Validation failed.\n"
-                "- Run the repro command to see where the chain breaks.\n"
-                "- Verify parent DS matches the zone’s DNSKEY (KSK).\n"
-                "- Check RRSIG timing (expired/not-yet-valid) and key rollover state.\n"
-                "- If intermittent, check DNSKEY consistency across all authoritatives."
-            )
-        if issue == "DNSKEY_INCONSISTENT":
-            return (
-                "Authoritative servers disagree on DNSKEY RRset.\n"
-                "- Compare SOA serial and DNSKEY across all NS; identify stale/out-of-sync servers.\n"
-                "- Fix IXFR/AXFR/NOTIFY or anycast propagation; reload/resync zone everywhere.\n"
-                "- During rollovers, publish old+new keys everywhere before removing old."
-            )
-        if issue in {"DNSKEY_NODATA", "DNSKEY_MISSING"}:
-            return (
-                "Expected DNSKEY but did not receive it.\n"
-                "- Confirm the zone is DNSSEC-signed and serving DNSKEY at the apex.\n"
-                "- Ensure all authoritative servers are serving the signed copy.\n"
-                "- Check propagation/anycast nodes/secondaries for stale unsigned data.\n"
-                "- Retry the repro with TCP: add '+tcp' to dig."
-            )
-        if issue in {"NS_UNREACHABLE", "NS_REFUSED"}:
-            return (
-                "An authoritative server could not be queried.\n"
-                "- Check network egress to port 53 UDP/TCP.\n"
-                "- Retry with TCP: dig +tcp ...\n"
-                "- If intermittent, suspect anycast/routing issues."
-            )
-        if issue == "PARENT_DS_QUERY_FAILED":
-            return (
-                "Could not determine DS status at the parent.\n"
-                "- This usually indicates network/path issues querying the parent’s authoritative servers.\n"
-                "- Verify outbound DNS (TCP/53) works to the TLD servers.\n"
-                "- Retry later or from another network."
-            )
-        if issue in {"DNSSEC_UNSIGNED", "PARENT_UNSIGNED"}:
-            return "Not required to be DNSSEC-signed under current policy (no action needed)."
-        if issue == "OK":
-            return "No issues detected by these checks."
-
-        return "No recommendation available for this issue."
-
+from dnssec_analytics import ReportAnalyzer
 
 # ============================================================
 # Reporting
@@ -125,35 +69,54 @@ class Reporter:
         df = df.sort_values(["_rank", "zone", "server"]).drop(columns=["_rank"]).reset_index(drop=True)
         return df
 
+from dnssec_scanner import DNSSECScanner
 
+class DNSSECTool:
+    def __init__(self, timeout: float = 8.0):
+        self.scanner = DNSSECScanner(timeout=timeout)
+
+    def scan_zone(self, zone: str):
+        return self.scanner.scan_zone(zone)
+    
 # ============================================================
 # Analytics + plotting (kept lightweight)
 # ============================================================
 
 class Analytics:
-    """Compute useful rollups from the report DataFrame."""
+    """
+    Single public analytics API.
+    Delegates to dnssec_analytics.ReportAnalyzer, then adds extra tables used by graphs.
+    """
 
     @staticmethod
     def compute(df: "pd.DataFrame") -> Dict[str, "pd.DataFrame"]:
+        ra = ReportAnalyzer()
+        base = ra.analytics(df)  # includes counts_by_issue, worst_zones, prioritized_queue, cooccurrence_pairs
+
+        # Always return the same keys for the UI/plotter
         if df is None or df.empty:
             empty = pd.DataFrame()
             return {
-                "counts_by_issue": empty,
+                "counts_by_issue": base.get("counts_by_issue", empty),
                 "counts_by_zone": empty,
                 "issue_by_zone": empty,
                 "counts_by_server": empty,
-                "worst_zones": empty,
+                "worst_zones": base.get("worst_zones", empty),
                 "severity_score_by_zone": empty,
+                "prioritized_queue": base.get("prioritized_queue", empty),
+                "cooccurrence_pairs": base.get("cooccurrence_pairs", empty),
             }
 
         broken = df[df["issue"] != "OK"].copy()
 
-        counts_by_issue = broken.groupby("issue").size().sort_values(ascending=False).reset_index(name="count")
-        counts_by_zone = broken.groupby("zone").size().sort_values(ascending=False).reset_index(name="count")
+        counts_by_zone = (
+            broken.groupby("zone").size().sort_values(ascending=False).reset_index(name="count")
+            if not broken.empty else pd.DataFrame(columns=["zone", "count"])
+        )
 
         issue_by_zone = (
-            broken.pivot_table(index="zone", columns="issue", values="server", aggfunc="count", fill_value=0)
-            .sort_index()
+            broken.pivot_table(index="zone", columns="issue", values="server", aggfunc="count", fill_value=0).sort_index()
+            if not broken.empty else pd.DataFrame()
         )
 
         counts_by_server = (
@@ -162,31 +125,38 @@ class Analytics:
                 ~broken["server"].astype(str).str.startswith("(")
             ]
             .groupby("server").size().sort_values(ascending=False).reset_index(name="count")
+            if not broken.empty else pd.DataFrame(columns=["server", "count"])
         )
 
+        # Simple severity scoring (you can tune weights later)
         weights = {
             "DNSSEC_BOGUS": 10,
+            "DS_MISMATCH": 9,
             "DNSKEY_INCONSISTENT": 7,
             "DNSKEY_NODATA": 6,
+            "DENIAL_PROOF_MISSING": 7,
+            "DENIAL_RRSIG_MISSING": 7,
             "NS_UNREACHABLE": 4,
             "NS_REFUSED": 4,
             "PARENT_DS_QUERY_FAILED": 3,
         }
-        broken["severity_weight"] = broken["issue"].map(weights).fillna(1).astype(int)
-        severity_score_by_zone = (
-            broken.groupby("zone")["severity_weight"].sum().sort_values(ascending=False).reset_index(name="severity_score")
-        )
-
-        # A concise "worst zones" table
-        worst_zones = counts_by_zone.merge(severity_score_by_zone, on="zone", how="left")
+        if not broken.empty:
+            broken["severity_weight"] = broken["issue"].map(weights).fillna(1).astype(int)
+            severity_score_by_zone = (
+                broken.groupby("zone")["severity_weight"].sum().sort_values(ascending=False).reset_index(name="severity_score")
+            )
+        else:
+            severity_score_by_zone = pd.DataFrame(columns=["zone", "severity_score"])
 
         return {
-            "counts_by_issue": counts_by_issue,
+            "counts_by_issue": base.get("counts_by_issue", pd.DataFrame(columns=["issue", "count"])),
             "counts_by_zone": counts_by_zone,
             "issue_by_zone": issue_by_zone,
             "counts_by_server": counts_by_server,
-            "worst_zones": worst_zones,
+            "worst_zones": base.get("worst_zones", pd.DataFrame(columns=["zone", "count", "issue_breakdown"])),
             "severity_score_by_zone": severity_score_by_zone,
+            "prioritized_queue": base.get("prioritized_queue", df.copy()),
+            "cooccurrence_pairs": base.get("cooccurrence_pairs", pd.DataFrame(columns=["issue_a", "issue_b", "zones_with_pair"])),
         }
 
 

@@ -11,7 +11,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from dnssec_tool import DNSSECTool, Analytics, Recommendations
+from dnssec_plot import DNSSECTool, Analytics, Recommendations
 
 app = FastAPI(title="DNS Settings Checker")
 tool = DNSSECTool(timeout=15)
@@ -30,6 +30,9 @@ def health():
     return {"ok": True}
 
 
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+
 @app.get("/check")
 def check(zone: str = Query(..., min_length=1, max_length=253)):
     zone = zone.strip().rstrip(".")
@@ -38,11 +41,20 @@ def check(zone: str = Query(..., min_length=1, max_length=253)):
 
     zr = tool.scan_zone(zone)
 
-    payload = zr.to_dict()  # ZoneResult dataclass has to_dict()
-    for f in payload.get("findings", []):
-        f["recommendation"] = Recommendations.recommend(f.get("issue", ""))
+    # Works whether zr is a dataclass, Pydantic model, or plain object
+    payload = zr.to_dict() if hasattr(zr, "to_dict") else jsonable_encoder(zr)
 
-    return jsonable_encoder(payload)
+    findings = payload.get("findings") or []
+    for f in findings:
+        try:
+            issue = (f.get("issue") if isinstance(f, dict) else getattr(f, "issue", "")) or ""
+            rec = Recommendations.recommend(issue)
+        except Exception:
+            rec = ""
+        if isinstance(f, dict):
+            f["recommendation"] = rec
+
+    return JSONResponse(content=payload)
 
 def plot_analytics_2x2_to_png(
     a: Dict[str, pd.DataFrame],
