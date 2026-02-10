@@ -59,6 +59,33 @@ class DnssecScanner:
         out = self.dig([f"@{self.dns_resolver_for_ds}", z, "DS", "+dnssec", "+noall", "+answer"])
         return bool(re.search(r"\sDS\s", out))
 
+    def _parent_zone(self, zone: str) -> str:
+        z = zone.rstrip(".") + "."
+        parts = z.split(".")
+        # "com." -> "."
+        if len(parts) <= 2:
+            return "."
+        return ".".join(parts[1:])
+
+    def _zone_has_dnskey(self, zone: str) -> bool:
+        """Treat zone as 'signed' if any of its authoritatives return DNSKEY in ANSWER."""
+        z = zone.rstrip(".") + "."
+        for ns in self.dig_ns(z):
+            out = self.dig([f"@{ns}", z, "DNSKEY", "+dnssec", "+norecurse", "+noall", "+answer"])
+            if re.search(r"\sDNSKEY\s", out):
+                return True
+        return False
+
+    def _parent_has_ds_for_child(self, parent: str, child: str) -> bool:
+        """Does the parent publish DS for the child? (authoritative check)"""
+        p = parent.rstrip(".") + "."
+        c = child.rstrip(".") + "."
+        for pns in self.dig_ns(p):
+            out = self.dig([f"@{pns}", c, "DS", "+dnssec", "+norecurse", "+noall", "+answer"])
+            if re.search(r"\sDS\s", out):
+                return True
+        return False
+
     # ---- delv probe ----
     def delv_probe(self, qname: str, qtype: str, server: Optional[str] = None) -> Dict[str, Any]:
         cmd = ["+rtrace", qname, qtype]
@@ -198,16 +225,30 @@ class DnssecScanner:
             ))
 
         # Gate DNSKEY checks for unsigned zones
-        if not self.is_dnssec_signed(z):
+        parent = self._parent_zone(z)
+        parent_signed = self._zone_has_dnskey(parent)
+
+        # If parent isn't signed, don't require child DNSSEC (so google.com passes in your scenario)
+        if not parent_signed:
             if self.include_unsigned_finding:
                 findings.append(Finding(
-                    zone=z, server="(resolver)", issue="DNSSEC_UNSIGNED",
-                    repro=f"dig @{self.dns_resolver_for_ds} {z} DS +dnssec +noall +answer",
-                    detail_tail="No DS returned by resolver; zone is not DNSSEC-signed. Skipping DNSKEY checks."
+                    zone=z, server="(parent)", issue="PARENT_UNSIGNED",
+                    repro=f"dig +dnssec @<parent-ns> {parent} DNSKEY +norecurse +noall +answer",
+                    detail_tail=f"Parent {parent} has no DNSKEY; not requiring DNSSEC for {z}. Skipping DNSKEY checks."
                 ))
-            overall = "fail" if any(f.issue not in {"DNSSEC_UNSIGNED", "OK"} for f in findings) else "pass"
+            overall = "fail" if any(f.issue not in {"PARENT_UNSIGNED", "OK"} for f in findings) else "pass"
             return ZoneResult(zone=z, overall=overall, nameservers=ns, findings=findings, ns_consistency={})
 
+        # Parent is signed: now require DS for the child at the parent
+        if not self._parent_has_ds_for_child(parent, z):
+            findings.append(Finding(
+                zone=z, server="(parent authoritatives)", issue="CHILD_UNSIGNED_UNDER_SIGNED_PARENT",
+                repro=f"dig +dnssec @<parent-ns> {z} DS +norecurse +noall +answer",
+                detail_tail=f"Parent {parent} is signed (DNSKEY present) but publishes no DS for {z}."
+            ))
+            overall = "fail"
+            return ZoneResult(zone=z, overall=overall, nameservers=ns, findings=findings, ns_consistency={})
+        
         ns_consistency = self.compare_dnskey_across_ns(z)
         if ns_consistency.get("nameservers") and ns_consistency.get("consistent_dnskey_rrset") is False:
             findings.append(Finding(
