@@ -29,15 +29,14 @@ def home():
 def health():
     return {"ok": True}
 
-
 @app.get("/check")
-def check(zone: str = Query(..., min_length=1, max_length=253)) -> Dict[str, Any]:
+def check(zone: str = Query(..., min_length=1, max_length=253)):
     zone = zone.strip().rstrip(".")
     if not zone or any(c.isspace() for c in zone):
         raise HTTPException(status_code=400, detail="Invalid zone")
 
-    return tool.scan_zone(zone)
-
+    result = tool.scan_zone(zone)
+    return jsonable_encoder(result)
 
 def plot_analytics_2x2_to_png(a: Dict[str, pd.DataFrame],
                              top_issues: int = 12,
