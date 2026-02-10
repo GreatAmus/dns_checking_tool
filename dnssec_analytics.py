@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from itertools import combinations
 from collections import Counter
 from typing import Dict, Any, List, Optional
