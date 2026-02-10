@@ -1,11 +1,13 @@
+# This is the analytics model. 
+# It creates reports based on what errors are encountered
+
 from itertools import combinations
 from collections import Counter
 from typing import Dict, Any, List, Optional
 import pandas as pd
 
-
+# Uses a data frame to build a summary of the findings
 class ReportAnalyzer:
-    """Builds summary tables from the findings DataFrame."""
 
     def __init__(self):
         pass
