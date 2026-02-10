@@ -1,17 +1,18 @@
 import io
-from typing import Any, Dict, List
+from typing import Dict
 
 import pandas as pd
 import matplotlib
+
 matplotlib.use("Agg")  # server-safe (no GUI)
 import matplotlib.pyplot as plt
 
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from dnssec_tool import DNSSECTool, Analytics  # from your existing module
-
 
 app = FastAPI(title="DNS Settings Checker")
 tool = DNSSECTool(timeout=15)
@@ -29,6 +30,7 @@ def home():
 def health():
     return {"ok": True}
 
+
 @app.get("/check")
 def check(zone: str = Query(..., min_length=1, max_length=253)):
     zone = zone.strip().rstrip(".")
@@ -36,18 +38,19 @@ def check(zone: str = Query(..., min_length=1, max_length=253)):
         raise HTTPException(status_code=400, detail="Invalid zone")
 
     result = tool.scan_zone(zone)
-    return jsonable_encoder(result)
 
-def plot_analytics_2x2_to_png(a: Dict[str, pd.DataFrame],
-                             top_issues: int = 12,
-                             top_zones: int = 15,
-                             heatmap_zones: int = 20,
-                             top_pairs: int = 10) -> bytes:
-    """
-    Adaptation of Plotter.plot_analytics_2x2() that returns a PNG instead of plt.show().
-    Your original creates a 2x2 figure from keys like:
-    counts_by_issue, severity_score_by_zone, issue_by_zone, cooccurrence_pairs. :contentReference[oaicite:3]{index=3}
-    """
+    # Ensure whatever ZoneResult is (Pydantic model / dataclass / custom object)
+    # becomes JSON-safe for FastAPI to return.
+    return JSONResponse(content=jsonable_encoder(result))
+
+
+def plot_analytics_2x2_to_png(
+    a: Dict[str, pd.DataFrame],
+    top_issues: int = 12,
+    top_zones: int = 15,
+    heatmap_zones: int = 20,
+    top_pairs: int = 10,
+) -> bytes:
     fig, axs = plt.subplots(2, 2, figsize=(16, 10))
     axs = axs.ravel()
 
@@ -122,7 +125,6 @@ def graph(zone: str = Query(..., min_length=1, max_length=253)) -> Response:
     if not zone or any(c.isspace() for c in zone):
         raise HTTPException(status_code=400, detail="Invalid zone")
 
-    # Build a 1-zone report -> analytics -> plot
     df = tool.report([zone])
     a = Analytics.compute(df)
     png = plot_analytics_2x2_to_png(a)
