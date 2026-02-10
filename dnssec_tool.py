@@ -1,4 +1,4 @@
-'''
+"""
 DNSSEC Checking Tool
 
 This module wraps common DNSSEC diagnostics (dig + delv) into a small, readable API.
@@ -18,18 +18,13 @@ Notes
   On Debian/Ubuntu/Colab:
     apt-get update
     apt-get install -y dnsutils bind9-dnsutils
-'''
+"""
 
-from __future__ import annotations
 import subprocess
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
-
-try:
-    import pandas as pd  # type: ignore
-except Exception:  # pragma: no cover
-    pd = None  # type: ignore
+import pandas as pd  
 
 # matplotlib is optional unless you call plotting methods
 try:
