@@ -1,209 +1,233 @@
 # test_dnssec_scanner.py
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
+import subprocess
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-
-# ----------------------------
-# Auto-import DnssecScanner
-# ----------------------------
-def _load_dnssec_scanner_class() -> type:
-    """
-    Finds a .py file under the project root that contains 'class DnssecScanner'
-    and imports DnssecScanner from it.
-
-    This avoids hardcoding 'from yourmodule import DnssecScanner'.
-    """
-    project_root = Path(__file__).resolve().parent
-
-    # Skip common junk dirs
-    skip_dirs = {".venv", "venv", "__pycache__", ".git", ".pytest_cache", "node_modules", "dist", "build"}
-
-    candidates = []
-    for py in project_root.rglob("*.py"):
-        parts = {p.name for p in py.parents}
-        if parts & skip_dirs:
-            continue
-        try:
-            txt = py.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        if "class DnssecScanner" in txt:
-            candidates.append(py)
-
-    if not candidates:
-        raise RuntimeError("Could not find a Python file defining 'class DnssecScanner' under the project root.")
-
-    # Prefer a file name that looks like scanner
-    candidates.sort(key=lambda p: (0 if "scanner" in p.name.lower() else 1, len(str(p))))
-
-    target = candidates[0]
-    mod_name = f"_dnssec_scanner_under_test_{re.sub(r'\\W+', '_', str(target))}"
-
-    spec = importlib.util.spec_from_file_location(mod_name, target)
-    if not spec or not spec.loader:
-        raise RuntimeError(f"Failed creating import spec for: {target}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # type: ignore[attr-defined]
-
-    if not hasattr(module, "DnssecScanner"):
-        raise RuntimeError(f"Imported {target} but it did not export DnssecScanner")
-
-    return getattr(module, "DnssecScanner")
-
-
-DnssecScanner = _load_dnssec_scanner_class()
+from dnssec_scanner import DnssecScanner
 
 
 # ----------------------------
-# Fake runner to stub dig/delv
+# Flexible FakeRunner
 # ----------------------------
 @dataclass
 class _FakeResult:
     output: str
 
 
-class FakeRunner:
+class FlexibleFakeRunner:
     """
-    Minimal stand-in for CommandRunner.
+    Fake runner that matches dig() calls by required tokens rather than exact arg lists.
 
-    Provide dig_map/delv_map mapping:
-        tuple(args) -> output string
+    Provide rules like:
+      dig_rules = [
+        (["@a.gtld-servers.net", "com.", "DNSKEY"], "....output...."),
+        (["+short", "com.", "NS"], "a.gtld-servers.net.\n"),
+      ]
+    The first rule whose required tokens are all present (in order-independent "contains" sense)
+    wins.
     """
     def __init__(
         self,
-        dig_map: Optional[Dict[Tuple[str, ...], str]] = None,
-        delv_map: Optional[Dict[Tuple[str, ...], str]] = None,
+        dig_rules: List[Tuple[List[str], str]],
+        delv_output: str = "",
     ):
-        self.dig_map = dig_map or {}
-        self.delv_map = delv_map or {}
+        self.dig_rules = dig_rules
+        self.delv_output = delv_output
 
-    def dig(self, args):
-        key = tuple(args)
-        if key not in self.dig_map:
-            raise AssertionError(f"Unexpected dig call:\n  args={args}\nAdd this key to dig_map.")
-        return _FakeResult(self.dig_map[key])
+    def dig(self, args: List[str]) -> _FakeResult:
+        for required, out in self.dig_rules:
+            if all(tok in args for tok in required):
+                return _FakeResult(out)
+        raise AssertionError(
+            "Unexpected dig call:\n"
+            f"  args={args}\n"
+            "No dig_rules matched. Add a rule with required tokens that appear in args."
+        )
 
-    def delv(self, args):
-        key = tuple(args)
-        # delv outputs aren't always critical; default to empty unless you want strictness
-        return _FakeResult(self.delv_map.get(key, ""))
-
-
-# ----------------------------
-# Helpers for building maps
-# ----------------------------
-def k(*args: str) -> Tuple[str, ...]:
-    return tuple(args)
+    def delv(self, args: List[str]) -> _FakeResult:
+        return _FakeResult(self.delv_output)
 
 
 # ----------------------------
-# Tests
+# Unit tests (deterministic)
 # ----------------------------
-
-def test_parent_unsigned_skips_child_dnskey_checks():
+def test_unit_parent_unsigned_skips_dnskey_checks():
     """
-    If parent isn't signed, we should not require the child to have DNSSEC.
-    This should prevent false positives like "DNSKEY_NODATA" for the child.
+    If parent isn't signed, scan returns early and does NOT emit DNSKEY_* issues.
     """
-    dig_map = {
-        # scan_zone() -> dig_ns(child)
-        k("+short", "google.com.", "NS"): "ns1.google.com.\n",
+    runner = FlexibleFakeRunner(
+        dig_rules=[
+            (["+short", "google.com.", "NS"], "ns1.google.com.\n"),
+            (["+short", "com.", "NS"], "a.gtld-servers.net.\n"),
 
-        # parent zone lookup -> dig_ns(parent)
-        k("+short", "com.", "NS"): "a.gtld-servers.net.\n",
+            # Parent DNSKEY query (any options) => empty ANSWER => treat as unsigned
+            (["@a.gtld-servers.net", "com.", "DNSKEY"], ""),
+        ],
+        delv_output="insecure\n",
+    )
 
-        # parent signed? -> query parent DNSKEY at its NS
-        # Empty answer means "parent unsigned" in this unit test.
-        k("@a.gtld-servers.net", "com.", "DNSKEY", "+dnssec", "+norecurse", "+noall", "+answer"): "",
-
-        # delv_probe called early: delv +rtrace zone SOA
-        # (We don't assert on this in this test; but provide something)
-    }
-    delv_map = {
-        k("+rtrace", "google.com.", "SOA"): "insecure\n"
-    }
-
-    s = DnssecScanner(runner=FakeRunner(dig_map=dig_map, delv_map=delv_map))
+    s = DnssecScanner(runner=runner, include_unsigned_finding=False)
     res = s.scan_zone("google.com")
 
     issues = {f.issue for f in res.findings}
     assert "DNSKEY_NODATA" not in issues
+    assert "DNSKEY_INCONSISTENT" not in issues
     assert "DNSKEY_MISSING" not in issues
-    # You might emit "PARENT_UNSIGNED" (or similar) depending on your patch; that's fine.
 
 
-def test_parent_signed_child_no_ds_flags_issue():
+def test_unit_parent_signed_child_no_ds_is_not_required_to_be_signed_when_policy_silent():
     """
-    If parent is signed AND parent does not publish DS for the child,
-    that is the policy violation we want to catch.
+    This asserts your desired behavior: if no DS at parent, the child is not required to be signed
+    and we do not produce DNSKEY_* warnings.
     """
-    dig_map = {
-        # scan_zone() -> dig_ns(child)
-        k("+short", "unsigned-under-signed.com.", "NS"): "ns1.unsigned-under-signed.com.\n",
+    runner = FlexibleFakeRunner(
+        dig_rules=[
+            # child NS
+            (["+short", "unsigned.com.", "NS"], "ns1.unsigned.com.\n"),
 
-        # parent zone: com.
-        k("+short", "com.", "NS"): "a.gtld-servers.net.\n",
+            # parent NS
+            (["+short", "com.", "NS"], "a.gtld-servers.net.\n"),
 
-        # parent signed
-        k("@a.gtld-servers.net", "com.", "DNSKEY", "+dnssec", "+norecurse", "+noall", "+answer"):
-            "com. 86400 IN DNSKEY 257 3 13 ABCD==\n",
+            # parent signed => has DNSKEY
+            (["@a.gtld-servers.net", "com.", "DNSKEY"], "com. 86400 IN DNSKEY 257 3 13 ABCD==\n"),
 
-        # parent DS for child is missing
-        k("@a.gtld-servers.net", "unsigned-under-signed.com.", "DS", "+dnssec", "+norecurse", "+noall", "+answer"): "",
-    }
-    delv_map = {
-        k("+rtrace", "unsigned-under-signed.com.", "SOA"): "secure\n"
-    }
+            # no DS for child at parent
+            (["@a.gtld-servers.net", "unsigned.com.", "DS"], ""),
+        ],
+        delv_output="secure\n",
+    )
 
-    s = DnssecScanner(runner=FakeRunner(dig_map=dig_map, delv_map=delv_map))
-    res = s.scan_zone("unsigned-under-signed.com")
+    s = DnssecScanner(runner=runner, include_unsigned_finding=False)
+    res = s.scan_zone("unsigned.com")
 
-    assert any(f.issue == "CHILD_UNSIGNED_UNDER_SIGNED_PARENT" for f in res.findings), \
-        f"Findings were: {[f.issue for f in res.findings]}"
+    issues = {f.issue for f in res.findings}
+    assert "DNSKEY_NODATA" not in issues
+    assert "DNSKEY_INCONSISTENT" not in issues
+    assert "DNSKEY_MISSING" not in issues
+    # Depending on your code, you may return early with no findings at all, which is fine.
 
 
-def test_parent_signed_ds_exists_but_child_has_no_dnskey_flags_nodata():
+def test_unit_ds_exists_then_missing_dnskey_is_real_problem():
     """
-    If DS exists at the parent (so we expect the child to be signed),
-    and child returns NODATA/SOA-only for DNSKEY, we should flag DNSKEY_NODATA (or equivalent).
+    If DS exists (child should be signed), and child returns SOA-only / no DNSKEY,
+    we should flag DNSKEY_NODATA.
     """
-    dig_map = {
-        # child NS
-        k("+short", "broken-signed.com.", "NS"): "ns1.broken-signed.com.\n",
+    runner = FlexibleFakeRunner(
+        dig_rules=[
+            (["+short", "broken.com.", "NS"], "ns1.broken.com.\n"),
+            (["+short", "com.", "NS"], "a.gtld-servers.net.\n"),
 
-        # parent com NS
-        k("+short", "com.", "NS"): "a.gtld-servers.net.\n",
+            # parent signed
+            (["@a.gtld-servers.net", "com.", "DNSKEY"], "com. 86400 IN DNSKEY 257 3 13 ABCD==\n"),
 
-        # parent signed
-        k("@a.gtld-servers.net", "com.", "DNSKEY", "+dnssec", "+norecurse", "+noall", "+answer"):
-            "com. 86400 IN DNSKEY 257 3 13 ABCD==\n",
+            # DS exists
+            (["@a.gtld-servers.net", "broken.com.", "DS"], "broken.com. 86400 IN DS 12345 13 2 DEADBEEF\n"),
 
-        # parent publishes DS for child
-        k("@a.gtld-servers.net", "broken-signed.com.", "DS", "+dnssec", "+norecurse", "+noall", "+answer"):
-            "broken-signed.com. 86400 IN DS 12345 13 2 DEADBEEF\n",
+            # child DNSKEY queries return nothing in ANSWER; authority SOA shows up in the
+            # dig_dnssec_sections() path; your code checks for " dnskey " in output.
+            (["@ns1.broken.com", "broken.com.", "DNSKEY"], "broken.com. 60 IN SOA ns1.broken.com. hostmaster.broken.com. 1 900 900 1800 60\n"),
+        ],
+        delv_output="secure\n",
+    )
 
-        # compare_dnskey_across_ns uses dig_answer() -> +dnssec +noall +answer
-        k("@ns1.broken-signed.com", "broken-signed.com.", "DNSKEY", "+dnssec", "+noall", "+answer"): "",
+    s = DnssecScanner(runner=runner, include_unsigned_finding=False)
+    res = s.scan_zone("broken.com")
 
-        # check_authoritative_ns uses dig_dnssec_sections() -> +answer +authority +comments
-        k("@ns1.broken-signed.com", "broken-signed.com.", "DNSKEY", "+dnssec", "+noall", "+answer", "+authority", "+comments"):
-            "broken-signed.com. 60 IN SOA ns1.broken-signed.com. hostmaster.broken-signed.com. 1 900 900 1800 60\n",
-    }
-    delv_map = {
-        k("+rtrace", "broken-signed.com.", "SOA"): "secure\n"
-    }
+    issues = [f.issue for f in res.findings]
+    assert "DNSKEY_NODATA" in issues
 
-    s = DnssecScanner(runner=FakeRunner(dig_map=dig_map, delv_map=delv_map))
-    res = s.scan_zone("broken-signed.com")
 
-    assert any(f.issue in {"DNSKEY_NODATA", "DNSKEY_MISSING"} for f in res.findings), \
-        f"Findings were: {[f.issue for f in res.findings]}"
+# ----------------------------
+# Optional integration tests (real DNS)
+# ----------------------------
+def _have_cmd(cmd: str) -> bool:
+    try:
+        subprocess.run([cmd, "-v"], capture_output=True, text=True, timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _run(cmd: List[str], timeout: int = 10) -> str:
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return (p.stdout or "") + (p.stderr or "")
+
+
+def _parent_zone(name: str) -> str:
+    z = name.rstrip(".") + "."
+    parts = z.split(".")
+    if len(parts) <= 2:
+        return "."
+    return ".".join(parts[1:])
+
+
+def _dig_short_ns(zone: str) -> List[str]:
+    out = _run(["dig", "+short", zone, "NS"])
+    return [l.strip().rstrip(".") for l in out.splitlines() if l.strip()]
+
+
+def _parent_ds_exists(child: str) -> Optional[bool]:
+    """
+    True/False/None based on authoritative parent DS over TCP.
+    """
+    child = child.rstrip(".") + "."
+    parent = _parent_zone(child)
+    parent_ns = _dig_short_ns(parent)
+    if not parent_ns:
+        return None
+
+    saw_success = False
+    saw_ds = False
+    for ns in parent_ns[:6]:
+        out = _run(["dig", f"@{ns}", child, "DS", "+dnssec", "+tcp", "+norecurse", "+noall", "+answer", "+comments"], timeout=10)
+        low = out.lower()
+        if out.startswith("[timeout") or "no servers could be reached" in low or "connection timed out" in low:
+            continue
+        if "refused" in low:
+            continue
+        saw_success = True
+        if re.search(r"\sDS\s", out):
+            saw_ds = True
+
+    if not saw_success:
+        return None
+    return True if saw_ds else False
+
+
+integration = pytest.mark.skipif(
+    os.getenv("RUN_INTEGRATION", "0") != "1",
+    reason="Integration tests disabled. Run with RUN_INTEGRATION=1",
+)
+
+requires_tools = pytest.mark.skipif(
+    not _have_cmd("dig"),
+    reason="dig not available in PATH",
+)
+
+
+@integration
+@requires_tools
+@pytest.mark.parametrize("domain", ["google.com", "cloudflare.com", "iana.org"])
+def test_integration_dnskey_checks_only_when_ds_exists(domain: str):
+    ds_state = _parent_ds_exists(domain)
+    if ds_state is None:
+        pytest.skip("Could not determine DS state from parent NS (network/path issue).")
+
+    scanner = DnssecScanner(include_unsigned_finding=False)
+    zr = scanner.scan_zone(domain)
+    issues = {f.issue for f in zr.findings}
+
+    dnskey_warnings = {"DNSKEY_NODATA", "DNSKEY_INCONSISTENT", "DNSKEY_MISSING"}
+
+    if ds_state is False:
+        assert dnskey_warnings.isdisjoint(issues), f"{domain} DS absent but scanner emitted DNSKEY warnings: {issues}"
+    else:
+        assert zr.nameservers, "Scanner did not discover nameservers"
+        # It's okay if ns_consistency is {} when you early-return on some failures, but it
+        # should not be empty due to skipping when DS exists.
