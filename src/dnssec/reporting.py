@@ -1,8 +1,7 @@
 from typing import List, Tuple, Dict, Any, Optional
 import pandas as pd
-from dnssec_scanner import DnssecScanner
-from dnssec_analytics import ReportAnalyzer
-from dnssec_tool import Recommendations
+from .scanner import DnssecScanner
+from .tool import Recommendations
 
 # Columns you likely want in the main UI/table
 DEFAULT_COLUMNS = ["zone", "issue", "recommendation"]
@@ -82,13 +81,3 @@ def reporting(
 
     return df
 
-
-def run_dnssec_report(
-    domains: List[str],
-    scanner: Optional[DnssecScanner] = None,
-    include_debug: bool = False,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    df = reporting(domains, scanner=scanner, include_debug=include_debug)
-    analyzer = ReportAnalyzer()
-    a = analyzer.analytics(df)
-    return df, a

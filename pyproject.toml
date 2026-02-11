@@ -1,0 +1,25 @@
+[project]
+name = "dns-checking-tool"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.110.0",
+  "uvicorn[standard]==0.27.1",
+  "pandas",
+  "matplotlib",
+  "dnspython>=2.4",
+  "cryptography>=41",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+dns-check = "dns_checking_tool.cli:main"

@@ -14,7 +14,7 @@ import dns.rdatatype
 import dns.rcode
 import dns.resolver
 
-from dnssec_models import Finding
+from .models import Finding
 
 
 @dataclass

@@ -1,0 +1,384 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DNS Settings Checker</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    .ok { color: #0a7; font-weight: 700; }
+    .bad { color: #b00020; font-weight: 700; }
+    .muted { opacity: .8; font-size: .95em; }
+    pre { max-height: 40vh; overflow: auto; margin: 0; }
+    table td, table th { vertical-align: top; }
+    code { font-size: 0.9em; }
+    .pill {
+      display: inline-block;
+      padding: .15rem .5rem;
+      border: 1px solid rgba(0,0,0,.15);
+      border-radius: 999px;
+      font-size: .85em;
+      margin-right: .35rem;
+      margin-bottom: .35rem;
+      background: rgba(0,0,0,.03);
+    }
+    details > summary { cursor: pointer; }
+  </style>
+</head>
+<body>
+<main class="container">
+  <h1>DNS Settings Checker</h1>
+  <p class="muted">
+    Enter a domain/zone (e.g., <code>example.com</code>). You’ll get scan results and recommendations.
+  </p>
+
+  <form id="form">
+    <label>
+      Domain / zone
+      <input id="zone" placeholder="example.com" required />
+    </label>
+    <button type="submit">Check</button>
+  </form>
+
+  <div id="status"></div>
+
+  <section id="results" style="display:none;">
+    <h2>Summary</h2>
+    <p><strong>Zone:</strong> <span id="zoneOut"></span></p>
+    <p><strong>Score:</strong> <span id="scoreOut"></span></p>
+    <p><strong>Issues:</strong> <span id="issuesOut"></span></p>
+
+    <div id="severityPills"></div>
+
+    <h2>Findings</h2>
+    <div id="findingsOut"></div>
+
+    <h2>Recommendations</h2>
+    <p class="muted">Action items inferred from the findings.</p>
+    <div id="recsOut"></div>
+
+    <h2>CAA</h2>
+    <div id="caaOut"></div>
+
+    <h2>MPIC (multi-perspective)</h2>
+    <p><strong>Risk:</strong> <span id="mpicRisk"></span> <span id="mpicMeta"></span></p>
+    <div id="mpicOut"></div>
+
+    <details>
+      <summary>Show raw response JSON</summary>
+      <pre id="rawOut">{}</pre>
+    </details>
+  </section>
+</main>
+
+<script>
+  const form = document.getElementById("form");
+  const zoneInput = document.getElementById("zone");
+  const status = document.getElementById("status");
+  const results = document.getElementById("results");
+
+  const zoneOut = document.getElementById("zoneOut");
+  const scoreOut = document.getElementById("scoreOut");
+  const issuesOut = document.getElementById("issuesOut");
+  const severityPills = document.getElementById("severityPills");
+
+  const findingsOut = document.getElementById("findingsOut");
+  const recsOut = document.getElementById("recsOut");
+
+  const caaOut = document.getElementById("caaOut");
+
+  const mpicRisk = document.getElementById("mpicRisk");
+  const mpicMeta = document.getElementById("mpicMeta");
+  const mpicOut = document.getElementById("mpicOut");
+
+  const rawOut = document.getElementById("rawOut");
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;");
+  }
+
+  function badge(text, ok) {
+    return `<span class="${ok ? "ok" : "bad"}">${esc(text)}</span>`;
+  }
+
+  function pill(label, value) {
+    return `<span class="pill"><strong>${esc(label)}:</strong> ${esc(value)}</span>`;
+  }
+
+  function uniqueNonEmpty(arr) {
+    const out = [];
+    const seen = new Set();
+    for (const x of arr) {
+      const v = String(x ?? "").trim();
+      if (!v) continue;
+      const k = v.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(v);
+    }
+    return out;
+  }
+
+  function severityOk(sev) {
+    sev = String(sev || "").toLowerCase();
+    return sev === "info" || sev === "low";
+  }
+
+  function renderFindings(findings) {
+    if (!Array.isArray(findings) || !findings.length) {
+      findingsOut.innerHTML = `<p class="ok">No findings reported.</p>`;
+      return;
+    }
+
+    let html = `
+      <table>
+        <thead><tr>
+          <th>Severity</th>
+          <th>Check</th>
+          <th>Issue</th>
+          <th>Title</th>
+          <th>Detail</th>
+          <th>Recommendation</th>
+        </tr></thead>
+        <tbody>
+    `;
+
+    for (const f of findings) {
+      const sev = (f.severity || "unknown").toLowerCase();
+      html += `
+        <tr>
+          <td>${badge(sev, severityOk(sev))}</td>
+          <td><code>${esc(f.check || "")}</code></td>
+          <td><code>${esc(f.issue || "")}</code></td>
+          <td>${esc(f.title || "")}</td>
+          <td><pre>${esc(f.detail || "")}</pre></td>
+          <td><pre>${esc(f.recommendation || "")}</pre></td>
+        </tr>
+      `;
+    }
+
+    html += `</tbody></table>`;
+    findingsOut.innerHTML = html;
+  }
+
+  function renderRecommendations(findings) {
+    const recs = uniqueNonEmpty((findings || []).map(f => f.recommendation));
+    if (!recs.length) {
+      recsOut.innerHTML = `<p class="muted">(No recommendations.)</p>`;
+      return;
+    }
+    recsOut.innerHTML = `
+      <ul>
+        ${recs.map(r => `<li>${esc(r)}</li>`).join("")}
+      </ul>
+    `;
+  }
+
+  function renderSummary(summary) {
+    const s = summary || {};
+    const score = (typeof s.score === "number") ? s.score : null;
+    const issues = (typeof s.issues === "number") ? s.issues : null;
+
+    scoreOut.innerHTML = score === null ? badge("unknown", false) : badge(String(score), score >= 85);
+    issuesOut.textContent = issues === null ? "unknown" : String(issues);
+
+    const pills = [];
+    for (const k of ["high", "medium", "low", "info", "unknown"]) {
+      if (typeof s[k] === "number") pills.push(pill(k, s[k]));
+    }
+    severityPills.innerHTML = pills.join("");
+  }
+
+  function renderCAA(checks) {
+    const caa = (checks && checks.caa) ? checks.caa : null;
+    if (!caa) {
+      caaOut.innerHTML = `<p class="muted">(No CAA data.)</p>`;
+      return;
+    }
+
+    const eff = caa.effective_domain || "";
+    const inherited = !!caa.inherited;
+    const records = Array.isArray(caa.records) ? caa.records : [];
+
+    // Policy signals (these keys come from caa.py)
+    const allowsAny = (caa.allows_any_issuance !== false);
+    const allowsWild = (caa.allows_wildcards !== false);
+    const allowsDcNon = (caa.allows_digicert_nonwild !== false);
+    const allowsDcWild = (caa.allows_digicert_wild !== false);
+
+    const header = records.length
+      ? `<p><strong>Effective at:</strong> <code>${esc(eff)}</code> ${inherited ? `<span class="pill">inherited</span>` : ""}</p>`
+      : `<p class="muted">No CAA records found (not restricted by CAA).</p>`;
+
+    const pills = `
+      <div>
+        ${pill("issuance", allowsAny ? "allowed" : "blocked")}
+        ${pill("wildcards", allowsWild ? "allowed" : "blocked")}
+        ${pill("DigiCert (non-wild)", allowsDcNon ? "allowed" : "not allowed")}
+        ${pill("DigiCert (wild)", allowsDcWild ? "allowed" : "not allowed")}
+      </div>
+    `;
+
+    let recTable = "";
+    if (records.length) {
+      recTable = `
+        <details open>
+          <summary>Show CAA records</summary>
+          <table>
+            <thead><tr>
+              <th>Record</th>
+            </tr></thead>
+            <tbody>
+              ${records.map(r => `<tr><td><code>${esc(r)}</code></td></tr>`).join("")}
+            </tbody>
+          </table>
+        </details>
+      `;
+    }
+
+    // Optional: show parsed entries nicely if present
+    const parsed = Array.isArray(caa.parsed) ? caa.parsed : [];
+    let parsedTable = "";
+    if (parsed.length) {
+      parsedTable = `
+        <details>
+          <summary>Show parsed CAA entries</summary>
+          <table>
+            <thead><tr>
+              <th>Flag</th>
+              <th>Tag</th>
+              <th>Value</th>
+            </tr></thead>
+            <tbody>
+              ${parsed.map(p => `
+                <tr>
+                  <td><code>${esc(p.flag)}</code></td>
+                  <td><code>${esc(p.tag)}</code></td>
+                  <td><code>${esc(p.value)}</code></td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </details>
+      `;
+    }
+
+    caaOut.innerHTML = header + pills + recTable + parsedTable;
+  }
+
+  function renderMPIC(checks) {
+    const mp = (checks && checks.mpic) ? checks.mpic : null;
+    if (!mp) {
+      mpicRisk.innerHTML = badge("not run", false);
+      mpicMeta.textContent = "";
+      mpicOut.innerHTML = `<p class="muted">(No MPIC data.)</p>`;
+      return;
+    }
+
+    const level = mp.risk_level || "unknown";
+    const score = (typeof mp.risk_score === "number") ? mp.risk_score : null;
+
+    mpicRisk.innerHTML = badge(level, level === "low");
+    mpicMeta.textContent = score === null ? "" : `(score ${score})`;
+
+    const queries = Array.isArray(mp.queries) ? mp.queries : [];
+    const divergent = queries.filter(q => q && q.consistent === false);
+
+    if (!queries.length) {
+      mpicOut.innerHTML = `<p class="muted">(No MPIC queries returned.)</p>`;
+      return;
+    }
+
+    let html = "";
+    if (divergent.length) {
+      html += `<p class="bad"><strong>Divergence detected</strong> on ${divergent.length} query(s).</p>`;
+    } else {
+      html += `<p class="ok"><strong>No divergence</strong> detected across perspectives.</p>`;
+    }
+
+    html += `
+      <details ${divergent.length ? "open" : ""}>
+        <summary>Show MPIC query details</summary>
+        <table>
+          <thead><tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Consistent</th>
+            <th>Divergent</th>
+          </tr></thead>
+          <tbody>
+    `;
+
+    for (const q of queries) {
+      const consistent = q.consistent === true;
+      const divP = Array.isArray(q.divergent_perspectives) ? q.divergent_perspectives : [];
+      html += `
+        <tr>
+          <td><code>${esc(q.qname || "")}</code></td>
+          <td><code>${esc(q.qtype || "")}</code></td>
+          <td>${badge(consistent ? "yes" : "no", consistent)}</td>
+          <td>${divP.length ? divP.map(p => `<span class="pill">${esc(p)}</span>`).join("") : ""}</td>
+        </tr>
+      `;
+    }
+
+    html += `</tbody></table></details>`;
+    mpicOut.innerHTML = html;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    status.innerHTML = "Checking…";
+    results.style.display = "none";
+    findingsOut.innerHTML = "";
+    recsOut.innerHTML = "";
+    severityPills.innerHTML = "";
+    caaOut.innerHTML = "";
+    mpicOut.innerHTML = "";
+    mpicRisk.textContent = "";
+    mpicMeta.textContent = "";
+    rawOut.textContent = "{}";
+
+    const zone = zoneInput.value.trim().replace(/\.$/, "");
+    try {
+      const res = await fetch(`/check?zone=${encodeURIComponent(zone)}`);
+      if (!res.ok) {
+        const t = await res.text();
+        status.innerHTML = `<p class="bad">Request failed (${res.status})</p><pre>${esc(t)}</pre>`;
+        return;
+      }
+
+      const data = await res.json();
+
+      rawOut.textContent = JSON.stringify(data, null, 2);
+
+      zoneOut.textContent = data.target || zone;
+      renderSummary(data.summary);
+
+      const findings = Array.isArray(data.findings) ? data.findings : [];
+      renderFindings(findings);
+      renderRecommendations(findings);
+
+      // NEW: CAA section (from checks.caa)
+      renderCAA(data.checks);
+
+      // MPIC section (from checks.mpic)
+      renderMPIC(data.checks);
+
+      const s = data.summary || {};
+      const fail = (s.high || 0) > 0 || (s.medium || 0) > 0;
+      status.innerHTML = fail
+        ? `<p class="bad">FAIL — see findings below.</p>`
+        : `<p class="ok">PASS</p>`;
+
+      results.style.display = "block";
+    } catch (err) {
+      status.innerHTML = `<p class="bad">Error</p><pre>${esc(err)}</pre>`;
+    }
+  });
+</script>
+</body>
+</html>

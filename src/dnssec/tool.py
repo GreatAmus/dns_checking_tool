@@ -6,9 +6,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
-from dnssec_checks import DNSSECChecks
-from dnssec_models import Finding, ZoneResult
-from dnssec_recommendations import Recommendations
+from .checks import DNSSECChecks
+from .models import Finding, ZoneResult
+from src.reporting.recommendations import Recommendations
 
 
 # -----------------------------

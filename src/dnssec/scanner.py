@@ -1,8 +1,8 @@
 # dnssec_scanner.py
 from __future__ import annotations
 
-from dnssec_checks import DNSSECChecks
-from dnssec_models import ZoneResult
+from .checks import DNSSECChecks
+from .models import ZoneResult
 
 
 class DNSSECScanner:
