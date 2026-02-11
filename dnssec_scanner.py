@@ -38,7 +38,8 @@ class DNSSECScanner:
         zr.findings.extend(self.checks.validate_rrsig_for_rrset(zone, "NS"))
 
         # 4) denial of existence (basic)
-        zr.findings.extend(self.checks.validate_denial_of_existence(zone))
+        if delegation.parent_signed and delegation.ds_records:
+            zr.findings.extend(self.checks.validate_denial_of_existence(zone))
 
         zr.finalize_overall()
         return zr

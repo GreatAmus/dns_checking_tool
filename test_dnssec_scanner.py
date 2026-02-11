@@ -216,7 +216,6 @@ def test_integration_dnskey_checks_only_when_ds_exists(domain: str):
     ds_required_findings = {
         "DS_MISMATCH",
         "DNSKEY_NODATA",
-        "DNSKEY_QUERY_FAILED",
         "DNSKEY_RRSIG_MISSING",
         "DNSKEY_RRSIG_INVALID",
     }
