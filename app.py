@@ -15,7 +15,7 @@ from dnssec_tool import DNSSECTool, Analytics
 from dnssec_recommendations import Recommendations
 
 app = FastAPI(title="DNS Settings Checker")
-tool = DNSSECTool(timeout=15)
+tool = DNSSECTool(timeout=15, strict_dnssec=True)
 
 # Serve static front-end
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -25,14 +25,12 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def home():
     return FileResponse("static/index.html")
 
-
 @app.get("/health")
 def health():
     return {"ok": True}
 
 
-from fastapi.responses import JSONResponse
-from fastapi.encoders import jsonable_encoder
+
 
 @app.get("/check")
 def check(zone: str = Query(..., min_length=1, max_length=253)):

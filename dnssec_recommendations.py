@@ -24,8 +24,40 @@ class Recommendations:
         "NX_PROBE_FAILED": "Non-existence probe failed. Check resolver reachability and that authoritative servers respond reliably.",
         "NX_PROBE_QUERY_FAILED": "Could not retrieve the full NXDOMAIN response message. Check UDP/TCP reachability and firewall rules.",
 
+        "VALIDATION_UNAVAILABLE": "Install the Python 'cryptography' package (and redeploy) so the checker can validate DNSSEC signatures.",
+        "DNSSEC_NOT_ENABLED": "No DS record exists at the parent, so the zone is delegated insecure. If you want DNSSEC enabled, publish DS at your registrar/parent.",
+
         # Informational
         "WILDCARD_PRESENT": "A wildcard may exist (random name returned data). Ensure wildcard behavior is intended; DNSSEC can still be correct.",
+
+        "DNSKEY_RRSIG_INVALID": (
+        "DNSKEY RRset signatures did not validate. Ensure authoritative servers publish "
+        "the correct DNSKEY RRset and matching RRSIGs, and that the zone is signed consistently "
+        "across all nameservers. Check for stale signatures or mismatched keys during rollover."
+        ),
+
+        "SOA_RRSIG_INVALID": (
+        "SOA RRset signatures did not validate. Ensure the zone is properly signed and that "
+        "authoritative servers serve consistent SOA+RRSIG. Look for stale/expired signatures "
+        "or inconsistent zone data between nameservers."
+        ),
+
+        "NS_RRSIG_INVALID": (
+            "NS RRset signatures did not validate. Ensure authoritative servers serve consistent NS+RRSIG "
+            "and that signatures are current (not expired) and match the active DNSKEY set."
+        ),
+        
+        "VALIDATION_UNAVAILABLE": (
+        "Install the Python 'cryptography' package (and redeploy) so the checker can validate DNSSEC signatures."
+        ),
+        "DNSKEY_RRSIG_INVALID": "DNSKEY RRset signatures did not validate. Ensure the zone is signed consistently across all authoritative servers and that DNSKEY/RRSIG sets are current and match the active keys.",
+        "SOA_RRSIG_INVALID": "SOA RRset signatures did not validate. Check for stale/expired signatures or inconsistent zone data across authoritative servers.",
+        "NS_RRSIG_INVALID": "NS RRset signatures did not validate. Ensure NS RRset and its signatures are consistent and current on all authoritative servers.",
+        "VALIDATION_UNAVAILABLE": "Install the Python 'cryptography' package in the deployment so DNSSEC signature validation can run.",
+        "NO_NAMESERVERS": "The zone has no NS records (lame/invalid delegation). Fix delegation so NS records exist at the parent.",
+        "NS_LOOKUP_FAILED": "NS lookup failed. Verify the zone exists and that recursive resolution is working; check for SERVFAIL/NXDOMAIN.",
+        "AUTH_NS_IP_LOOKUP_FAILED": "Nameservers exist but did not resolve to IPs. Fix glue/NS hostnames or DNS for the nameserver names.",
+
     }
 
     @classmethod

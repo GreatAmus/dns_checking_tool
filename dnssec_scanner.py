@@ -1,45 +1,60 @@
+# dnssec_scanner.py
 from __future__ import annotations
 
-from typing import List
-
 from dnssec_checks import DNSSECChecks
-from dnssec_models import Finding, ZoneResult
+from dnssec_models import ZoneResult
 
 
 class DNSSECScanner:
-    def __init__(self, timeout: float = 8.0):
-        self.checks = DNSSECChecks(timeout=timeout)
+    def __init__(
+        self,
+        timeout: float = 8.0,
+        include_unsigned_finding: bool = False,
+        strict_dnssec: bool = False,
+    ):
+        self.checks = DNSSECChecks(timeout=timeout, strict_dnssec=strict_dnssec)
+        self.include_unsigned_finding = bool(include_unsigned_finding)
 
     def scan_zone(self, zone: str) -> ZoneResult:
         zone = zone.strip().rstrip(".")
+        z = zone + "."
         zr = ZoneResult(zone=zone)
 
         # nameservers (best effort)
         try:
-            zr.nameservers = self.checks._resolve_ns(zone + ".")
+            zr.nameservers = self.checks._resolve_ns_names(z)
         except Exception:
             zr.nameservers = []
 
-        # 1) delegation / DS
-        delegation, f = self.checks.check_parent_signed_and_ds(zone)
+        # Delegation / DS
+        delegation, f = self.checks.get_delegation_ds(zone)
+
+        # Optionally suppress the "unsigned delegation" informational finding
+        if not self.include_unsigned_finding:
+            f = [x for x in f if x.issue not in ("DNSSEC_NOT_ENABLED", "PARENT_UNSIGNED")]
+
         zr.findings.extend(f)
 
-        # If parent is unsigned, we can still do “zone-signed” checks, but chain-of-trust isn’t required.
-        # If parent is signed and DS is missing/error, chain checks will show failures; still continue with local checks.
+        # If unsigned delegation, skip the rest (this avoids bogus DNSKEY/RRSIG failures)
+        if not delegation.ds_present:
+            zr.finalize_overall()
+            return zr
 
-        # 2) if DS exists, ensure it matches DNSKEY
-        if delegation.parent_signed and delegation.ds_records:
-            zr.findings.extend(self.checks.check_ds_matches_dnskey(zone, delegation.ds_records))
+        # DS <-> DNSKEY match
+        zr.findings.extend(self.checks.check_ds_matches_dnskey(zone, delegation.ds_records))
 
-        # 3) validate signatures for critical rrsets
-        # DNSKEY self-sign + SOA are the most important
+        # If DNSKEY query failed, no point continuing with signature validation
+        if any(x.issue == "DNSKEY_QUERY_FAILED" for x in zr.findings):
+            zr.finalize_overall()
+            return zr
+
+        # Validate critical apex RRsets
         zr.findings.extend(self.checks.validate_rrsig_for_rrset(zone, "DNSKEY"))
         zr.findings.extend(self.checks.validate_rrsig_for_rrset(zone, "SOA"))
         zr.findings.extend(self.checks.validate_rrsig_for_rrset(zone, "NS"))
 
-        # 4) denial of existence (basic)
-        if delegation.parent_signed and delegation.ds_records:
-            zr.findings.extend(self.checks.validate_denial_of_existence(zone))
+        # Denial of existence checks
+        zr.findings.extend(self.checks.validate_denial_of_existence(zone))
 
         zr.finalize_overall()
         return zr

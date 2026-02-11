@@ -1,16 +1,18 @@
+# dnssec_checks.py
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import dns.dnssec
+import dns.flags
 import dns.message
 import dns.name
 import dns.query
 import dns.rdatatype
+import dns.rcode
 import dns.resolver
-import dns.dnssec
-import dns.exception
 
 from dnssec_models import Finding
 
@@ -18,174 +20,299 @@ from dnssec_models import Finding
 @dataclass
 class DelegationInfo:
     parent: str
-    parent_signed: bool
+    ds_present: bool
+    ds_records: List[Dict[str, Any]]
     ds_rrset_text: Optional[str] = None
-    ds_records: List[Dict[str, Any]] = None
-
-    def __post_init__(self):
-        if self.ds_records is None:
-            self.ds_records = []
 
 
 class DNSSECChecks:
     """
-    All DNSSEC checks live here.
-    The scanner calls these and aggregates Findings.
+    DNSSEC checks designed to report legitimate DNSSEC issues.
+
+    Key behaviors:
+      - DS is fetched from the parent zone's authoritative servers and may appear in ANSWER or AUTHORITY.
+      - DNSKEY is fetched from the child zone's authoritative servers (by IP) using EDNS+DO + TCP fallback.
+      - DNSKEY results are cached to avoid duplicate/ repeated failures.
+      - DS mismatch is computed using *KSKs only* (DNSKEY with SEP bit set).
+      - RRSIG validation failures (dns.dnssec.ValidationFailure) are reported as *_RRSIG_INVALID (not "unexpected error").
+      - Missing 'cryptography' becomes VALIDATION_UNAVAILABLE (environment issue, not DNS misconfig).
     """
 
-    def __init__(self, timeout: float = 8.0):
-        self.timeout = timeout
+    def __init__(self, timeout: float = 8.0, strict_dnssec: bool = False):
+        self.timeout = float(timeout)
+        self.strict_dnssec = bool(strict_dnssec)
+
         self._resolver = dns.resolver.Resolver()
-        self._resolver.lifetime = timeout
-        self._resolver.timeout = timeout
+        self._resolver.timeout = self.timeout
+        self._resolver.lifetime = self.timeout
 
-    # ---------- Basic helpers ----------
+        # Per-instance caches
+        self._ns_cache: Dict[str, List[str]] = {}
+        self._ips_cache: Dict[str, List[str]] = {}
+        self._auth_ip_cache: Dict[str, List[str]] = {}
+        # zone_fqdn -> (dnskey_rrset, server_ip_used, debug_detail_if_missing)
+        self._dnskey_cache: Dict[str, Tuple[Optional[Any], Optional[str], Optional[str]]] = {}
 
-    def _parent_zone(self, zone: str) -> str:
-        n = dns.name.from_text(zone).canonicalize()
+    # ------------------------- helpers -------------------------
+
+    @staticmethod
+    def _fqdn(name: str) -> str:
+        return name.strip().rstrip(".") + "."
+
+    @staticmethod
+    def _parent_zone(zone_fqdn: str) -> str:
+        n = dns.name.from_text(zone_fqdn).canonicalize()
         if len(n) <= 1:
             return "."
         return str(n.parent())
 
-    def _resolve_ns(self, zone: str) -> List[str]:
-        ans = self._resolver.resolve(zone, "NS")
-        # dnspython returns names with trailing dot; normalize without dot for consistency
-        return sorted({str(r.target).rstrip(".") for r in ans})
+    def _resolve_ns_names(self, zone_fqdn: str) -> List[str]:
+        if zone_fqdn in self._ns_cache:
+            return self._ns_cache[zone_fqdn]
+        ans = self._resolver.resolve(zone_fqdn, "NS")
+        ns = sorted({str(r.target).rstrip(".") for r in ans})
+        self._ns_cache[zone_fqdn] = ns
+        return ns
 
-    def _udp_query(self, server: str, qname: str, qtype: str, want_dnssec: bool = True):
-        msg = dns.message.make_query(
+    def _resolve_ips(self, host: str) -> List[str]:
+        if host in self._ips_cache:
+            return self._ips_cache[host]
+
+        ips: List[str] = []
+        for rdtype in ("A", "AAAA"):
+            try:
+                a = self._resolver.resolve(host, rdtype)
+                ips.extend([r.address for r in a])
+            except Exception:
+                pass
+
+        seen = set()
+        out: List[str] = []
+        for ip in ips:
+            if ip not in seen:
+                seen.add(ip)
+                out.append(ip)
+
+        self._ips_cache[host] = out
+        return out
+
+    def _authoritative_server_ips(self, zone_fqdn: str) -> List[str]:
+        if zone_fqdn in self._auth_ip_cache:
+            return self._auth_ip_cache[zone_fqdn]
+
+        ips: List[str] = []
+        for ns in self._resolve_ns_names(zone_fqdn):
+            ips.extend(self._resolve_ips(ns))
+
+        seen = set()
+        out: List[str] = []
+        for ip in ips:
+            if ip not in seen:
+                seen.add(ip)
+                out.append(ip)
+
+        self._auth_ip_cache[zone_fqdn] = out
+        return out
+
+    def _make_query(self, qname: str, qtype: str) -> dns.message.Message:
+        return dns.message.make_query(
             qname,
             qtype,
-            want_dnssec=want_dnssec,
+            want_dnssec=True,
             use_edns=True,
             payload=1232,
         )
-        return dns.query.udp(msg, server, timeout=self.timeout)
 
-    def _tcp_query(self, server: str, qname: str, qtype: str, want_dnssec: bool = True):
-        msg = dns.message.make_query(
-            qname,
-            qtype,
-            want_dnssec=want_dnssec,
-            use_edns=True,
-            payload=1232,
+    def _query(self, server_ip: str, qname: str, qtype: str) -> dns.message.Message:
+        msg = self._make_query(qname, qtype)
+        resp = dns.query.udp(msg, server_ip, timeout=self.timeout)
+        if resp.flags & dns.flags.TC:
+            resp = dns.query.tcp(msg, server_ip, timeout=self.timeout)
+        return resp
+
+    @staticmethod
+    def _debug_resp(resp: dns.message.Message) -> str:
+        return (
+            f"AA={bool(resp.flags & dns.flags.AA)} "
+            f"rcode={dns.rcode.to_text(resp.rcode())} "
+            f"answer_rrsets={len(resp.answer)} authority_rrsets={len(resp.authority)} additional_rrsets={len(resp.additional)}"
         )
-        return dns.query.tcp(msg, server, timeout=self.timeout)
 
-    def _query_auth(self, server: str, qname: str, qtype: str):
+    @staticmethod
+    def _first_rrset_in_answer(resp: dns.message.Message, rdtype_text: str) -> Optional[Any]:
+        want = dns.rdatatype.from_text(rdtype_text)
+        for rrset in resp.answer:
+            if rrset.rdtype == want:
+                return rrset
+        return None
+
+    @staticmethod
+    def _rrsets_answer_or_authority(resp: dns.message.Message, rdtype_text: str) -> List[Any]:
+        want = dns.rdatatype.from_text(rdtype_text)
+        rrsets = [rr for rr in resp.answer if rr.rdtype == want]
+        if not rrsets:
+            rrsets = [rr for rr in resp.authority if rr.rdtype == want]
+        return rrsets
+
+    # ------------------------- delegation / DS -------------------------
+
+    def get_delegation_ds(self, zone: str) -> Tuple[DelegationInfo, List[Finding]]:
         """
-        Try UDP, fall back to TCP if truncated.
+        Query the parent zone's authoritative servers for DS(zone).
+
+        - DS can appear in ANSWER or AUTHORITY.
+        - If no DS exists, we treat the delegation as unsigned.
+          * strict_dnssec=False -> DNSSEC_NOT_ENABLED (info)
+          * strict_dnssec=True  -> DS_MISSING (error)
         """
-        try:
-            r = self._udp_query(server, qname, qtype, want_dnssec=True)
-            if r.flags & dns.flags.TC:
-                r = self._tcp_query(server, qname, qtype, want_dnssec=True)
-            return r
-        except Exception as e:
-            raise e
-
-    # ---------- Delegation / chain-of-trust ----------
-
-    def check_parent_signed_and_ds(self, zone: str) -> Tuple[DelegationInfo, List[Finding]]:
         findings: List[Finding] = []
-        z = zone.rstrip(".") + "."
-        parent = self._parent_zone(z)
 
-        # Is parent signed? (has DNSKEY)
-        parent_signed = False
-        try:
-            dnskey = self._resolver.resolve(parent, "DNSKEY")
-            parent_signed = len(list(dnskey)) > 0
-        except Exception:
-            parent_signed = False
+        child = self._fqdn(zone)
+        parent = self._parent_zone(child)
 
-        info = DelegationInfo(parent=parent.rstrip("."), parent_signed=parent_signed)
-
-        if not parent_signed:
+        parent_auth_ips = self._authoritative_server_ips(parent)
+        if not parent_auth_ips:
             findings.append(
                 Finding(
                     zone=zone,
-                    issue="PARENT_UNSIGNED",
-                    severity="info",
-                    detail=f"Parent zone {parent} did not appear to publish DNSKEY; DNSSEC may not be required at delegation.",
-                )
-            )
-            return info, findings
-
-        # Query DS for child at parent (via recursive resolver is ok for presence,
-        # but if you want strict, query parent auths; this is the pragmatic start)
-        try:
-            ds_ans = self._resolver.resolve(z, "DS")
-            ds_list = []
-            for r in ds_ans:
-                ds_list.append(
-                    {
-                        "key_tag": r.key_tag,
-                        "algorithm": r.algorithm,
-                        "digest_type": r.digest_type,
-                        "digest": r.digest.hex() if hasattr(r.digest, "hex") else str(r.digest),
-                    }
-                )
-            info.ds_records = ds_list
-            info.ds_rrset_text = "\n".join([r.to_text() for r in ds_ans])
-        except dns.resolver.NXDOMAIN:
-            findings.append(
-                Finding(zone=zone, issue="DS_NXDOMAIN", severity="error", detail="Parent returned NXDOMAIN for DS query.")
-            )
-            return info, findings
-        except dns.resolver.NoAnswer:
-            findings.append(
-                Finding(
-                    zone=zone,
-                    issue="DS_MISSING",
-                    severity="warning",
-                    detail=f"Parent {parent} is signed but no DS record exists for {z}.",
-                )
-            )
-            return info, findings
-        except Exception as e:
-            findings.append(
-                Finding(
-                    zone=zone,
-                    issue="PARENT_DS_QUERY_FAILED",
+                    issue="PARENT_NS_IP_LOOKUP_FAILED",
                     severity="error",
-                    detail=f"Failed to query DS at parent: {type(e).__name__}: {e}",
+                    detail=f"Could not resolve parent authoritative server IPs for {parent}.",
                 )
             )
-            return info, findings
+            return DelegationInfo(parent=parent.rstrip("."), ds_present=False, ds_records=[]), findings
 
-        if not info.ds_records:
-            findings.append(
-                Finding(zone=zone, issue="DS_MISSING", severity="warning", detail="No DS records returned.")
+        last_debug: Optional[str] = None
+        last_exc: Optional[str] = None
+
+        for ip in parent_auth_ips[:10]:
+            try:
+                resp = self._query(ip, child, "DS")
+                last_debug = self._debug_resp(resp)
+
+                ds_rrsets = self._rrsets_answer_or_authority(resp, "DS")
+                if not ds_rrsets:
+                    continue
+
+                ds_list: List[Dict[str, Any]] = []
+                for rrset in ds_rrsets:
+                    for r in rrset:
+                        ds_list.append(
+                            {
+                                "key_tag": r.key_tag,
+                                "algorithm": r.algorithm,
+                                "digest_type": r.digest_type,
+                                "digest": r.digest.hex(),
+                            }
+                        )
+
+                info = DelegationInfo(
+                    parent=parent.rstrip("."),
+                    ds_present=True,
+                    ds_records=ds_list,
+                    ds_rrset_text="\n".join(rrset.to_text() for rrset in ds_rrsets),
+                )
+                return info, findings
+            except Exception as e:
+                last_exc = f"{type(e).__name__}: {e} (server={ip})"
+                continue
+
+        # No DS returned by any parent server
+        issue = "DS_MISSING" if self.strict_dnssec else "DNSSEC_NOT_ENABLED"
+        severity = "error" if self.strict_dnssec else "info"
+
+        findings.append(
+            Finding(
+                zone=zone,
+                issue=issue,
+                severity=severity,
+                server=parent_auth_ips[0],
+                repro=f"dig +dnssec DS {child} @{parent_auth_ips[0]}",
+                detail=(
+                    f"No DS record was returned by parent ({parent}) authoritative servers for {child}. "
+                    f"This indicates an unsigned delegation."
+                    + (f" {last_debug}" if last_debug else "")
+                    + (f" Last error: {last_exc}" if last_exc else "")
+                ).strip(),
             )
+        )
 
-        return info, findings
+        return DelegationInfo(parent=parent.rstrip("."), ds_present=False, ds_records=[]), findings
+
+    # ------------------------- DNSKEY from child auth -------------------------
+
+    def get_dnskey_rrset(self, zone: str) -> Tuple[Optional[Any], Optional[str], Optional[str]]:
+        """
+        Returns (dnskey_rrset, server_ip_used, debug_if_missing).
+        Cached per zone to avoid duplicate repeated failures.
+        """
+        z = self._fqdn(zone)
+        if z in self._dnskey_cache:
+            return self._dnskey_cache[z]
+
+        auth_ips = self._authoritative_server_ips(z)
+        if not auth_ips:
+            out = (None, None, "No authoritative server IPs found for zone.")
+            self._dnskey_cache[z] = out
+            return out
+
+        last_detail: Optional[str] = None
+
+        for ip in auth_ips[:10]:
+            try:
+                resp = self._query(ip, z, "DNSKEY")
+                dnskey_rrset = self._first_rrset_in_answer(resp, "DNSKEY")
+
+                if dnskey_rrset is None:
+                    last_detail = f"DNSKEY missing from answer. {self._debug_resp(resp)} server={ip}"
+                    continue
+
+                if not (resp.flags & dns.flags.AA):
+                    last_detail = f"DNSKEY present but AA=0. {self._debug_resp(resp)} server={ip}"
+                    continue
+
+                out = (dnskey_rrset, ip, None)
+                self._dnskey_cache[z] = out
+                return out
+
+            except Exception as e:
+                last_detail = f"{type(e).__name__}: {e} (server={ip})"
+                continue
+
+        out = (None, auth_ips[0], last_detail or "DNSKEY query failed on all authoritative servers.")
+        self._dnskey_cache[z] = out
+        return out
+
+    # ------------------------- DS matches DNSKEY -------------------------
 
     def check_ds_matches_dnskey(self, zone: str, ds_records: List[Dict[str, Any]]) -> List[Finding]:
         """
-        Compute DS from child DNSKEY(s) and compare to parent DS RR.
+        Compute DS from current DNSKEY KSK(s) (SEP=1) and ensure at least one matches parent DS.
         """
         findings: List[Finding] = []
-        z = zone.rstrip(".") + "."
+        z = self._fqdn(zone)
 
-        try:
-            dnskey_ans = self._resolver.resolve(z, "DNSKEY")
-        except Exception as e:
+        dnskey_rrset, ip, debug = self.get_dnskey_rrset(zone)
+        if dnskey_rrset is None:
             findings.append(
-                Finding(zone=zone, issue="DNSKEY_QUERY_FAILED", severity="error", detail=f"DNSKEY query failed: {e}")
+                Finding(
+                    zone=zone,
+                    issue="DNSKEY_QUERY_FAILED",
+                    severity="error",
+                    server=ip,
+                    repro=(f"dig +dnssec DNSKEY {z} @{ip}" if ip else None),
+                    detail=f"Authoritative DNSKEY query returned no DNSKEY rrset. {debug or ''}".strip(),
+                )
             )
             return findings
 
-        # Build rrset for dnspython DS computation
-        dnskey_rrset = dnskey_ans.rrset
-        if dnskey_rrset is None:
-            findings.append(Finding(zone=zone, issue="DNSKEY_NODATA", severity="error", detail="No DNSKEY RRset."))
-            return findings
-
-        computed = []
+        computed: List[Dict[str, Any]] = []
         for r in dnskey_rrset:
-            # compute DS for common digest types 2 (SHA-256) and 4 (SHA-384)
-            for digest_type in (2, 4):
+            # DS should be computed from KSK(s): DNSKEY with SEP bit set.
+            if not (r.flags & 0x0001):
+                continue
+
+            for digest_type in (2, 4):  # SHA-256, SHA-384
                 try:
                     ds = dns.dnssec.make_ds(dns.name.from_text(z), r, digest_type)
                     computed.append(
@@ -205,12 +332,11 @@ class DNSSECChecks:
                     zone=zone,
                     issue="DS_COMPUTE_FAILED",
                     severity="error",
-                    detail="Could not compute DS from DNSKEY (unsupported key/digest?).",
+                    detail="Could not compute DS from DNSKEY KSK(s) (no SEP keys found or unsupported key/digest).",
                 )
             )
             return findings
 
-        # compare
         parent_set = {(d["key_tag"], d["algorithm"], d["digest_type"], d["digest"].lower()) for d in ds_records}
         child_set = {(d["key_tag"], d["algorithm"], d["digest_type"], d["digest"].lower()) for d in computed}
 
@@ -220,141 +346,212 @@ class DNSSECChecks:
                     zone=zone,
                     issue="DS_MISMATCH",
                     severity="error",
-                    detail="Parent DS does not match any DS computed from current DNSKEY.",
+                    detail="Parent DS does not match any DS computed from current DNSKEY KSK(s).",
                     data={"parent_ds": ds_records, "computed_ds": computed},
                 )
             )
         return findings
 
-    # ---------- Signature validation ----------
+    # ------------------------- RRSIG validation -------------------------
 
     def validate_rrsig_for_rrset(self, zone: str, rrtype: str) -> List[Finding]:
         """
-        Validate RRSIG(rrtype) for zone apex using DNSKEY.
-        Validates cryptographically using dnspython.
+        Fetch {rrtype} rrset at zone apex from authoritative servers and validate its RRSIG
+        using the zone DNSKEY rrset.
         """
         findings: List[Finding] = []
-        z = zone.rstrip(".") + "."
+        z = self._fqdn(zone)
 
-        try:
-            dnskey_ans = self._resolver.resolve(z, "DNSKEY")
-            dnskey_rrset = dnskey_ans.rrset
-        except Exception as e:
-            findings.append(Finding(zone=zone, issue="DNSKEY_QUERY_FAILED", severity="error", detail=str(e)))
-            return findings
-
+        # DNSKEY is required for any signature validation.
+        dnskey_rrset, dnskey_ip, dnskey_debug = self.get_dnskey_rrset(zone)
         if dnskey_rrset is None:
-            findings.append(Finding(zone=zone, issue="DNSKEY_NODATA", severity="error", detail="No DNSKEY RRset."))
-            return findings
-
-        # query target rrset with dnssec
-        try:
-            ans = self._resolver.resolve(z, rrtype, raise_on_no_answer=False)
-            rrset = ans.rrset
-            rrsig = None
-            if ans.response and ans.response.answer:
-                # find RRSIG in answer section for rrtype
-                for rr in ans.response.answer:
-                    if rr.rdtype == dns.rdatatype.RRSIG and dns.rdatatype.to_text(rr.covers) == rrtype:
-                        rrsig = rr
-                        break
-        except dns.resolver.NoAnswer:
-            rrset = None
-            rrsig = None
-        except Exception as e:
             findings.append(
-                Finding(zone=zone, issue=f"{rrtype}_QUERY_FAILED", severity="error", detail=f"{type(e).__name__}: {e}")
+                Finding(
+                    zone=zone,
+                    issue="DNSKEY_QUERY_FAILED",
+                    severity="error",
+                    server=dnskey_ip,
+                    repro=(f"dig +dnssec DNSKEY {z} @{dnskey_ip}" if dnskey_ip else None),
+                    detail=f"Authoritative DNSKEY query returned no DNSKEY rrset. {dnskey_debug or ''}".strip(),
+                )
             )
             return findings
 
+        auth_ips = self._authoritative_server_ips(z)
+        if not auth_ips:
+            findings.append(
+                Finding(
+                    zone=zone,
+                    issue=f"{rrtype}_QUERY_FAILED",
+                    severity="error",
+                    detail="Could not determine authoritative server IPs for zone.",
+                )
+            )
+            return findings
+
+        want_type = dns.rdatatype.from_text(rrtype)
+
+        rrset: Optional[Any] = None
+        rrsig: Optional[Any] = None
+        server_ip_used: Optional[str] = None
+        last_debug: Optional[str] = None
+        last_exc: Optional[str] = None
+
+        # Query authoritative servers until we get an authoritative answer containing the rrset.
+        for ip in auth_ips[:10]:
+            try:
+                resp = self._query(ip, z, rrtype)
+                last_debug = self._debug_resp(resp)
+
+                if not (resp.flags & dns.flags.AA):
+                    continue
+
+                rrset = None
+                rrsig = None
+
+                for a in resp.answer:
+                    if a.rdtype == want_type:
+                        rrset = a
+                    if a.rdtype == dns.rdatatype.RRSIG and dns.rdatatype.to_text(a.covers) == rrtype:
+                        rrsig = a
+
+                if rrset is not None:
+                    server_ip_used = ip
+                    break
+
+            except Exception as e:
+                last_exc = f"{type(e).__name__}: {e} (server={ip})"
+                continue
+
+        # If no rrset, it's not necessarily a DNSSEC issue; it could be missing data.
         if rrset is None:
             findings.append(
-                Finding(zone=zone, issue=f"{rrtype}_NODATA", severity="warning", detail=f"No {rrtype} RRset at apex.")
+                Finding(
+                    zone=zone,
+                    issue=f"{rrtype}_NODATA",
+                    severity="warning",
+                    server=auth_ips[0],
+                    repro=f"dig +dnssec {rrtype} {z} @{auth_ips[0]}",
+                    detail=(
+                        f"No authoritative {rrtype} RRset at apex. "
+                        + (f"{last_debug} " if last_debug else "")
+                        + (f"Last error: {last_exc}" if last_exc else "")
+                    ).strip(),
+                )
             )
             return findings
 
+        # If rrset exists but RRSIG missing, that *is* a DNSSEC issue for a signed zone.
         if rrsig is None:
             findings.append(
-                Finding(zone=zone, issue=f"{rrtype}_RRSIG_MISSING", severity="error", detail=f"Missing RRSIG for {rrtype}.")
+                Finding(
+                    zone=zone,
+                    issue=f"{rrtype}_RRSIG_MISSING",
+                    severity="error",
+                    server=server_ip_used or auth_ips[0],
+                    repro=(f"dig +dnssec {rrtype} {z} @{server_ip_used}" if server_ip_used else f"dig +dnssec {rrtype} {z} @{auth_ips[0]}"),
+                    detail=f"Missing RRSIG covering {rrtype}.",
+                )
             )
             return findings
 
-        # Build key dict for validate()
         key_dict = {dns.name.from_text(z): dnskey_rrset}
 
         try:
             dns.dnssec.validate(rrset, rrsig, key_dict)
+
         except dns.dnssec.ValidationFailure as e:
+            # Legit DNSSEC misconfiguration: signature(s) present but none validate.
             findings.append(
                 Finding(
                     zone=zone,
                     issue=f"{rrtype}_RRSIG_INVALID",
                     severity="error",
+                    server=server_ip_used or auth_ips[0],
+                    repro=(f"dig +dnssec {rrtype} {z} @{server_ip_used}" if server_ip_used else f"dig +dnssec {rrtype} {z} @{auth_ips[0]}"),
                     detail=f"RRSIG validation failed for {rrtype}: {e}",
                 )
             )
+
+        except ImportError as e:
+            # Environment problem (missing cryptography), not a DNS misconfiguration.
+            findings.append(
+                Finding(
+                    zone=zone,
+                    issue="VALIDATION_UNAVAILABLE",
+                    severity="error",
+                    server=server_ip_used or auth_ips[0],
+                    repro=(f"dig +dnssec {rrtype} {z} @{server_ip_used}" if server_ip_used else f"dig +dnssec {rrtype} {z} @{auth_ips[0]}"),
+                    detail=f"Signature validation unavailable in this deployment: {e}. Install 'cryptography' to enable DNSSEC validation.",
+                )
+            )
+
         except Exception as e:
             findings.append(
                 Finding(
                     zone=zone,
                     issue=f"{rrtype}_RRSIG_VALIDATE_ERROR",
                     severity="error",
+                    server=server_ip_used or auth_ips[0],
+                    repro=(f"dig +dnssec {rrtype} {z} @{server_ip_used}" if server_ip_used else f"dig +dnssec {rrtype} {z} @{auth_ips[0]}"),
                     detail=f"Unexpected validation error for {rrtype}: {type(e).__name__}: {e}",
                 )
             )
 
-        # Timing sanity (inception/expiration) is embedded in dnspython validation,
-        # but if you want explicit outputs, parse rrsig fields here.
-
         return findings
 
-    # ---------- Denial of existence ----------
+    # ------------------------- denial of existence (basic) -------------------------
 
     def validate_denial_of_existence(self, zone: str) -> List[Finding]:
         """
-        Basic check: query a random non-existent name under zone and ensure response includes
-        signed NSEC/NSEC3 proof (presence check + signature validation where possible).
+        Best-effort check that an NXDOMAIN/NODATA response includes NSEC/NSEC3 (+ RRSIG).
         """
         findings: List[Finding] = []
-        z = zone.rstrip(".") + "."
+        z = self._fqdn(zone)
 
-        qname = f"__dnssec_probe_{random.randint(100000, 999999)}.{z}"
-        try:
-            resp = self._resolver.resolve(qname, "A", raise_on_no_answer=False)
-            # We want NXDOMAIN, or NODATA with proofs. If it returned A, unexpected wildcard exists.
-            if resp.rrset is not None and len(resp.rrset) > 0:
-                findings.append(
-                    Finding(
-                        zone=zone,
-                        issue="WILDCARD_PRESENT",
-                        severity="info",
-                        detail="Random non-existent name returned records (wildcard likely present).",
-                        data={"qname": qname},
-                    )
-                )
-                return findings
-        except dns.resolver.NXDOMAIN:
-            # NXDOMAIN is fine, now check the response content for NSEC/NSEC3 in authority
-            # dnspython's resolver hides the message; do a direct query to get authority.
-            pass
-        except Exception as e:
+        auth_ips = self._authoritative_server_ips(z)
+        if not auth_ips:
             findings.append(
-                Finding(zone=zone, issue="NX_PROBE_FAILED", severity="warning", detail=f"{type(e).__name__}: {e}")
+                Finding(
+                    zone=zone,
+                    issue="NX_PROBE_FAILED",
+                    severity="warning",
+                    detail="Could not determine authoritative server IPs for NXDOMAIN probe.",
+                )
             )
             return findings
 
-        # direct query (recursive, but yields authority proofs typically)
-        try:
-            msg = dns.message.make_query(qname, "A", want_dnssec=True)
-            # Use system resolver’s first nameserver
-            ns = self._resolver.nameservers[0]
-            m = dns.query.udp(msg, ns, timeout=self.timeout)
-        except Exception as e:
-            findings.append(Finding(zone=zone, issue="NX_PROBE_QUERY_FAILED", severity="warning", detail=str(e)))
+        qname = f"__dnssec_probe_{random.randint(100000, 999999)}.{z}"
+
+        resp: Optional[dns.message.Message] = None
+        server_ip_used: Optional[str] = None
+        last_exc: Optional[str] = None
+
+        for ip in auth_ips[:10]:
+            try:
+                r = self._query(ip, qname, "A")
+                if r.flags & dns.flags.AA:
+                    resp = r
+                    server_ip_used = ip
+                    break
+            except Exception as e:
+                last_exc = f"{type(e).__name__}: {e} (server={ip})"
+                continue
+
+        if resp is None:
+            findings.append(
+                Finding(
+                    zone=zone,
+                    issue="NX_PROBE_QUERY_FAILED",
+                    severity="warning",
+                    server=auth_ips[0],
+                    repro=f"dig +dnssec A {qname} @{auth_ips[0]}",
+                    detail=f"NX probe query failed. {last_exc or ''}".strip(),
+                )
+            )
             return findings
 
-        # Presence check for NSEC/NSEC3 + RRSIG
-        auth = m.authority or []
+        auth = resp.authority or []
         has_nsec = any(rr.rdtype == dns.rdatatype.NSEC for rr in auth)
         has_nsec3 = any(rr.rdtype == dns.rdatatype.NSEC3 for rr in auth)
         has_rrsig = any(rr.rdtype == dns.rdatatype.RRSIG for rr in auth)
@@ -365,8 +562,10 @@ class DNSSECChecks:
                     zone=zone,
                     issue="DENIAL_PROOF_MISSING",
                     severity="error",
-                    detail="NXDOMAIN response did not include NSEC/NSEC3 proof in authority section.",
-                    data={"qname": qname},
+                    server=server_ip_used or auth_ips[0],
+                    repro=(f"dig +dnssec A {qname} @{server_ip_used}" if server_ip_used else f"dig +dnssec A {qname} @{auth_ips[0]}"),
+                    detail="NXDOMAIN/NODATA response did not include NSEC/NSEC3 proof in authority section.",
+                    data={"qname": qname, "debug": self._debug_resp(resp)},
                 )
             )
             return findings
@@ -377,12 +576,11 @@ class DNSSECChecks:
                     zone=zone,
                     issue="DENIAL_RRSIG_MISSING",
                     severity="error",
+                    server=server_ip_used or auth_ips[0],
+                    repro=(f"dig +dnssec A {qname} @{server_ip_used}" if server_ip_used else f"dig +dnssec A {qname} @{auth_ips[0]}"),
                     detail="Denial proof present but no RRSIG in authority section.",
-                    data={"qname": qname},
+                    data={"qname": qname, "debug": self._debug_resp(resp)},
                 )
             )
-
-        # Full cryptographic validation of denial proofs is more involved (requires chasing NSEC3 params),
-        # but the presence checks above catch many real breakages. You can extend later.
 
         return findings

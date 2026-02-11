@@ -1,42 +1,34 @@
-from dataclasses import dataclass, field, asdict
+# dnssec_models.py
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-
 
 @dataclass
 class Finding:
     zone: str
     issue: str
-    severity: str = "warning"  # info|warning|error
+    severity: str = "info"
     server: Optional[str] = None
     repro: Optional[str] = None
-    detail: Optional[str] = None
+    detail: str = ""
+    recommendation: Optional[str] = None
     data: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+    # compatibility for older/newer reporter code
+    detail_head: Optional[str] = None
+    detail_tail: Optional[str] = None
 
 
 @dataclass
 class ZoneResult:
     zone: str
-    overall: str = "unknown"  # pass|warn|fail|unknown
+    overall: str = "unknown"
     nameservers: List[str] = field(default_factory=list)
     findings: List[Finding] = field(default_factory=list)
-    ns_consistency: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        d["findings"] = [f.to_dict() for f in self.findings]
-        return d
-
-    def finalize_overall(self) -> None:
-        # simple roll-up: any error => fail, else any warning => warn, else pass
-        severities = {f.severity for f in self.findings}
-        if "error" in severities:
-            self.overall = "fail"
-        elif "warning" in severities:
-            self.overall = "warn"
-        elif self.findings:
-            self.overall = "pass"
-        else:
-            self.overall = "pass"
+        return {
+            "zone": self.zone,
+            "overall": self.overall,
+            "nameservers": self.nameservers,
+            "findings": [f.__dict__ for f in self.findings],
+        }
