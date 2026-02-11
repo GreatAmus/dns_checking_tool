@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 
 from dnssec_scanner import DNSSECScanner
 from dnssec_models import Finding, ZoneResult
+from dnssec_recommendations import Recommendations
 from dnssec_analytics import ReportAnalyzer
 
 # ============================================================
@@ -245,7 +246,7 @@ class DNSSECTool:
 
     def __init__(self, timeout: int = 20, include_unsigned_finding: bool = False):
         # DnssecScanner internally uses dnssec_runner.CommandRunner, so keep construction simple.
-        self.scanner = DnssecScanner(cmd_timeout_seconds=timeout, include_unsigned_finding=include_unsigned_finding)
+        self.scanner = DNSSECScanner(cmd_timeout_seconds=timeout, include_unsigned_finding=include_unsigned_finding)
         self.reporter = Reporter(self.scanner)
 
     def scan_zone(self, zone: str) -> ZoneResult:

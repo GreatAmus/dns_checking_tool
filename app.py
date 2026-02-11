@@ -11,7 +11,8 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from dnssec_tool import DNSSECTool, Analytics, Recommendations
+from dnssec_tool import DNSSECTool, Analytics
+from dnssec_recommendations import Recommendations
 
 app = FastAPI(title="DNS Settings Checker")
 tool = DNSSECTool(timeout=15)
