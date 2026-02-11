@@ -5,14 +5,18 @@ DNSSEC Checking Tool provides:
 - Analytics + plotting
 """
 
-from typing import Dict, List, Tuple, Any, Optional
+from __future__ import annotations
+
+from typing import Dict, List, Any
+
 import pandas as pd
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 
 from dnssec_scanner import DNSSECScanner
-from dnssec_models import Finding, ZoneResult
+from dnssec_models import ZoneResult
 from dnssec_recommendations import Recommendations
 from dnssec_analytics import ReportAnalyzer
+
 
 # ============================================================
 # Reporting
@@ -40,7 +44,7 @@ class Reporter:
                 continue
 
             for f in zr.findings:
-                row = {
+                row: Dict[str, Any] = {
                     "zone": f.zone,
                     "server": f.server,
                     "issue": f.issue,
@@ -57,11 +61,15 @@ class Reporter:
 
         issue_rank = {
             "DNSSEC_BOGUS": 0,
-            "DNSKEY_INCONSISTENT": 1,
-            "DNSKEY_NODATA": 2,
-            "NS_UNREACHABLE": 3,
-            "NS_REFUSED": 4,
-            "PARENT_DS_QUERY_FAILED": 5,
+            "DS_MISMATCH": 1,
+            "DNSKEY_INCONSISTENT": 2,
+            "DNSKEY_NODATA": 3,
+            "DENIAL_PROOF_MISSING": 4,
+            "DENIAL_RRSIG_MISSING": 5,
+            "NS_UNREACHABLE": 10,
+            "NS_REFUSED": 11,
+            "PARENT_DS_QUERY_FAILED": 12,
+            "DS_MISSING": 20,
             "DNSSEC_UNSIGNED": 90,
             "PARENT_UNSIGNED": 91,
             "OK": 99,
@@ -70,15 +78,7 @@ class Reporter:
         df = df.sort_values(["_rank", "zone", "server"]).drop(columns=["_rank"]).reset_index(drop=True)
         return df
 
-from dnssec_scanner import DNSSECScanner
 
-class DNSSECTool:
-    def __init__(self, timeout: float = 8.0):
-        self.scanner = DNSSECScanner(timeout=timeout)
-
-    def scan_zone(self, zone: str):
-        return self.scanner.scan_zone(zone)
-    
 # ============================================================
 # Analytics + plotting (kept lightweight)
 # ============================================================
@@ -92,7 +92,7 @@ class Analytics:
     @staticmethod
     def compute(df: "pd.DataFrame") -> Dict[str, "pd.DataFrame"]:
         ra = ReportAnalyzer()
-        base = ra.analytics(df)  # includes counts_by_issue, worst_zones, prioritized_queue, cooccurrence_pairs
+        base = ra.analytics(df)  # expected keys: counts_by_issue, worst_zones, prioritized_queue, cooccurrence_pairs
 
         # Always return the same keys for the UI/plotter
         if df is None or df.empty:
@@ -129,7 +129,7 @@ class Analytics:
             if not broken.empty else pd.DataFrame(columns=["server", "count"])
         )
 
-        # Simple severity scoring (you can tune weights later)
+        # Simple severity scoring
         weights = {
             "DNSSEC_BOGUS": 10,
             "DS_MISMATCH": 9,
@@ -140,6 +140,7 @@ class Analytics:
             "NS_UNREACHABLE": 4,
             "NS_REFUSED": 4,
             "PARENT_DS_QUERY_FAILED": 3,
+            "DS_MISSING": 2,
         }
         if not broken.empty:
             broken["severity_weight"] = broken["issue"].map(weights).fillna(1).astype(int)
@@ -166,9 +167,6 @@ class Plotter:
 
     @staticmethod
     def plot_analytics_2x2(a: Dict[str, "pd.DataFrame"], top_issues: int = 12, top_zones: int = 15) -> None:
-        if plt is None:
-            raise RuntimeError("matplotlib is required for Plotter.plot_analytics_2x2()")
-
         fig, axs = plt.subplots(2, 2, figsize=(16, 10))
         axs = axs.ravel()
 
@@ -244,9 +242,9 @@ class DNSSECTool:
       tool.plot_analytics_2x2(a)
     """
 
-    def __init__(self, timeout: int = 20, include_unsigned_finding: bool = False):
-        # DnssecScanner internally uses dnssec_runner.CommandRunner, so keep construction simple.
-        self.scanner = DNSSECScanner(cmd_timeout_seconds=timeout, include_unsigned_finding=include_unsigned_finding)
+    def __init__(self, timeout: float = 20.0, include_unsigned_finding: bool = False):
+        # IMPORTANT: new scanner signature uses timeout=... (not cmd_timeout_seconds).
+        self.scanner = DNSSECScanner(timeout=timeout, include_unsigned_finding=include_unsigned_finding)
         self.reporter = Reporter(self.scanner)
 
     def scan_zone(self, zone: str) -> ZoneResult:
