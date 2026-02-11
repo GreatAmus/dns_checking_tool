@@ -2,7 +2,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import pandas as pd
 from dnssec_scanner import DnssecScanner
 from dnssec_analytics import ReportAnalyzer
-from dnssec_plot import Recommendations
+from dnssec_tool import Recommendations
 
 # Columns you likely want in the main UI/table
 DEFAULT_COLUMNS = ["zone", "issue", "recommendation"]

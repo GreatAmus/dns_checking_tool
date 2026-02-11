@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Any, Optional
 import pandas as pd
 import matplotlib.pyplot as plt 
 
-from dnssec_scanner import DnssecScanner
+from dnssec_scanner import DNSSECScanner
 from dnssec_models import Finding, ZoneResult
 from dnssec_analytics import ReportAnalyzer
 
@@ -18,7 +18,7 @@ from dnssec_analytics import ReportAnalyzer
 # ============================================================
 
 class Reporter:
-    def __init__(self, scanner: DnssecScanner):
+    def __init__(self, scanner: DNSSECScanner):
         self.scanner = scanner
 
     def report(self, zones: List[str], include_debug: bool = True) -> "pd.DataFrame":
