@@ -1,11 +1,24 @@
+
 services:
-  unbound:
-    image: mvance/unbound:latest
-    container_name: unbound
+  resolver:
+    build:
+      context: .
+      dockerfile: Dockerfile.resolver
+    expose:
+      - "5053/tcp"
+      - "5053/udp"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      RESOLVER_HOST: "resolver"
+      RESOLVER_PORT: "5053"
+      PORT: "8080"
     ports:
-      - "5053:53/udp"
-      - "5053:53/tcp"
-    volumes:
-      - ./unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
-      - ./unbound-data:/opt/unbound/etc/unbound
+      - "8080:8080"
+    depends_on:
+      - resolver
     restart: unless-stopped

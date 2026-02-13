@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    dnsutils \
+    ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the whole repo so package files (including static/) are present.
+COPY . /app
+
+# Editable install uses the source directory directly (so static/ exists at runtime)
+RUN pip install --no-cache-dir -U pip && \
+    pip install --no-cache-dir -e .
+
+ENV PORT=8080
+ENV PYTHONUNBUFFERED=1
+
+CMD ["sh", "-lc", "uvicorn dns_checking_tool.app:app --host 0.0.0.0 --port ${PORT}"]

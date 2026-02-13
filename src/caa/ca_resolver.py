@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-
+import socket
 import dns.flags
 import dns.message
 import dns.query
@@ -46,10 +44,20 @@ class UnboundValidatingResolver:
         timeout: float = 2.0,
         use_tcp: bool = False,
     ) -> None:
-        self.ip = ip
+        # dnspython expects an IP literal, not a hostname.
+        # Fly internal DNS may resolve to IPv6 (6PN), so use getaddrinfo (v4/v6).
+        try:
+            infos = socket.getaddrinfo(ip, None, type=socket.SOCK_DGRAM)
+            # sockaddr is (addr, port) for IPv4, (addr, port, flow, scope) for IPv6
+            self.ip = infos[0][4][0]
+        except OSError:
+            self.ip = ip  # already an IP or resolution failed; keep as-is
+
         self.port = port
         self.timeout = timeout
         self.use_tcp = use_tcp
+
+
 
     def query(self, qname: str, qtype: str, *, checking_disabled: bool = False) -> DNSQueryResult:
         qname = qname.rstrip(".") + "."

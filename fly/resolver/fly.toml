@@ -1,0 +1,16 @@
+app = "dns-checking-resolver"
+primary_region = "ord"
+
+[build]
+  dockerfile = "../../Dockerfile.resolver"
+
+# IMPORTANT:
+# We intentionally do NOT define any [http_service] or [[services]] here.
+# That keeps it from being publicly exposed via Fly's edge.
+#
+# The resolver still listens on 0.0.0.0:5053 inside the VM/container.
+# The API will reach it over Fly private networking at:
+#   dns-checking-resolver.internal:5053
+#
+# If you later want to add private health checks or private services, we can,
+# but this is the simplest secure baseline.

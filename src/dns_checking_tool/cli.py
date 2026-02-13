@@ -7,7 +7,7 @@ from dnssec.tool import DNSSECTool
 from mpic.mpic import MPICChecker
 from caa.caa import CAAChecker
 from reporting.targets import *
-
+from dnshealth.tool import DNSHealthTool
 
 """
 The command-line interface for the DNS Checker (DNSSEC + MPIC + CAA)
@@ -19,7 +19,7 @@ The command-line interface mirros the flow of the API
 """
 
 # Input validation/normalization used by app.py.
-from src.reporting.targets import InvalidDomain, require_domain
+from reporting.targets import InvalidDomain, require_domain
 
 # Parse the command-line arguemetns
 def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
@@ -35,6 +35,7 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
 
     # Included in response["meta"] so you can track CLI output versions.
     p.add_argument("--version", default="0.1", help="Version string included in output meta")
+    p.add_argument("--no-health", action="store_true", help="Disable DNS health checks")
 
     return p.parse_args(argv)
 
@@ -70,38 +71,30 @@ def validate_zones(raw_zones: List[str]) -> List[str]:
 
     return normalized
 
-
 def run_checks_for_zone(
     zone: str,
     dnssec_tool: DNSSECTool,
     mpic_tool: MPICChecker,
+    health_tool: DNSHealthTool,   # <-- add
     assembler: Assemble,
     enable_mpic: bool,
+    enable_health: bool,          # <-- add
     version: str,
 ) -> Dict[str, Any]:
-    """
-    Run checkers for a single zone and assemble into one response dict.
-
-    Args:
-        zone: Normalized zone name.
-        dnssec_tool: Initialized DNSSEC tool.
-        mpic_tool: Initialized MPIC checker.
-        assembler: Assemble instance (merges findings, recommendations, summary).
-        enable_mpic: Whether to run MPIC checks.
-        version: Version string stored in response meta.
-
-    Returns:
-        Unified JSON-safe response dict.
-    """
     checks: Dict[str, Any] = {"dnssec": dnssec_tool.scan_zone(zone)}
+
     if enable_mpic:
         checks["mpic"] = mpic_tool.check_zone(zone)
+
+    if enable_health:
+        checks["dns_health"] = health_tool.check_zone(zone)
 
     return assembler.build(
         target=zone,
         checks=checks,
         meta={"version": version, "source": "cli"},
     )
+
 
 
 def print_human(zone_response: Dict[str, Any]) -> None:
@@ -159,6 +152,7 @@ def main(argv: List[str] | None = None) -> int:
     # Create tools once and reuse for all zones (faster than recreating per zone).
     dnssec_tool = DNSSECTool(timeout=args.dnssec_timeout, strict_dnssec=True)
     mpic_tool = MPICChecker(timeout=args.mpic_timeout, lifetime=args.mpic_lifetime)
+    health_tool = DNSHealthTool(timeout=2.0, lifetime=2.0)
     assembler = Assemble()
 
     # Run checks for each zone.
@@ -169,8 +163,10 @@ def main(argv: List[str] | None = None) -> int:
                 zone=zone,
                 dnssec_tool=dnssec_tool,
                 mpic_tool=mpic_tool,
+                health_tool=health_tool,             # <-- add
                 assembler=assembler,
                 enable_mpic=not args.no_mpic,
+                enable_health=not args.no_health,    # <-- add
                 version=args.version,
             )
         )

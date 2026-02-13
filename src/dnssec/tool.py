@@ -8,7 +8,7 @@ import pandas as pd
 
 from .checks import DNSSECChecks
 from .models import Finding, ZoneResult
-from src.reporting.recommendations import Recommendations
+from reporting.recommendations import Recommendations
 
 
 # -----------------------------

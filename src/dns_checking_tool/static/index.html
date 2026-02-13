@@ -441,9 +441,7 @@
 
     // Quick tagline without another box
     const fail = (s.high || 0) > 0 || (s.medium || 0) > 0;
-    summaryTagline.innerHTML = fail
-      ? `<span class="bad">FAIL</span> — address high/medium findings first.`
-      : `<span class="ok">PASS</span> — no high/medium findings.`;
+    summaryTagline.innerHTML = "";
 
     const pills = [];
     for (const k of ["high","medium","low","info","unknown"]) {
