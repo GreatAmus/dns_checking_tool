@@ -7,6 +7,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 # Enables hosting UI assets (JS/CSS/images) from a folder:
 from fastapi.staticfiles import StaticFiles
+from dcv import DCVTool
 
 # The core engine that actually performs the DNS/DNSSEC checks.
 from dnssec.tool import DNSSECTool
@@ -44,6 +45,7 @@ assembler = Assemble()
 mpic = MPICChecker(timeout=3.5, lifetime=3.5)
 caa = CAAChecker(resolver=resolver, max_labels=10)
 health = DNSHealthTool(timeout=2.0, lifetime=2.0)
+dcv = DCVTool(timeout_seconds=2.5, max_redirects=5, dns_timeout=2.0, dns_lifetime=2.0)
 
 # Serve static front-end
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -67,6 +69,7 @@ def check(zone: str = Query(..., min_length=1, max_length=253)):
     mpic_result = mpic.check_zone(zone)  # <-- NEW (returns MPICResult)
     caa_result = caa.check_zone(zone)
     health_result = health.check_zone(zone)  # add
+    dcv_result = dcv.check(zone)
 
     # Assemble unified payload (findings merged automatically)
     response = assembler.build(
@@ -76,6 +79,7 @@ def check(zone: str = Query(..., min_length=1, max_length=253)):
             "dnssec": dnssec_result,
             "mpic": mpic_result,
             "caa": caa_result,
+            "dcv": dcv_result,
         },
         meta={"version": "0.1"},
     )

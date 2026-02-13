@@ -97,6 +97,28 @@
     }
     @media (max-width: 900px){ .toolbar{ grid-template-columns: 1fr; } }
 
+    /* NEW: check toggles row */
+    .check-toggles{
+      grid-column: 1 / -1;
+      display:flex;
+      align-items:center;
+      gap:.5rem;
+      flex-wrap:wrap;
+      margin-top:.25rem;
+    }
+    .check-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:.35rem;
+      padding: .18rem .55rem;
+      border: 1px solid rgba(0,0,0,.12);
+      border-radius: 999px;
+      background: rgba(0,0,0,.02);
+      font-size: .9em;
+      user-select:none;
+    }
+    .check-pill input{ margin: 0; }
+
     /* Finding cards */
     details > summary{ cursor: pointer; }
     .finding{
@@ -284,25 +306,35 @@
         <div class="muted">Filter by severity or search within titles/details.</div>
       </div>
 
-      <div class="toolbar">
-        <label style="margin:0;">
-          Search (title/detail/issue)
-          <input id="searchBox" placeholder="e.g. CAA, DNSSEC, timeout…" />
-        </label>
+ <div class="toolbar">
+  <label style="margin:0;">
+    Search (title/detail/issue)
+    <input id="searchBox" placeholder="e.g. CAA, DNSSEC, timeout…" />
+  </label>
 
-        <label style="margin:0;">
-          Severity
-          <select id="severityFilter">
-            <option value="all">All</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-            <option value="info">Info</option>
-            <option value="unknown">Unknown</option>
-          </select>
-        </label>
+  <label style="margin:0;">
+    Severity
+    <select id="severityFilter">
+      <option value="all">All</option>
+      <option value="high">High</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+      <option value="info">Info</option>
+      <option value="unknown">Unknown</option>
+    </select>
+  </label>
+
+  <!-- NEW: Check toggles -->
+      <div class="check-toggles">
+        <span class="muted" style="font-weight:800;">Checks</span>
+        <label class="check-pill"><input type="checkbox" id="toggleHealth" checked /> Health</label>
+        <label class="check-pill"><input type="checkbox" id="toggleDNSSEC" checked /> DNSSEC</label>
+        <label class="check-pill"><input type="checkbox" id="toggleCAA" checked /> CAA</label>
+        <label class="check-pill"><input type="checkbox" id="toggleMPIC" checked /> MPIC</label>
       </div>
-
+    </div>
+    <div>
+      <div id="healthSection"></div>
       <div id="dnssecSection"></div>
       <div id="caaSection"></div>
       <div id="mpicSection"></div>
@@ -351,6 +383,7 @@
   const searchBox = document.getElementById("searchBox");
   const severityFilter = document.getElementById("severityFilter");
 
+  const healthSection = document.getElementById("healthSection");
   const dnssecSection = document.getElementById("dnssecSection");
   const caaSection = document.getElementById("caaSection");
   const mpicSection = document.getElementById("mpicSection");
@@ -364,6 +397,20 @@
 
   let lastFindings = [];
   let lastChecks = {};
+    const toggleHealth = document.getElementById("toggleHealth");
+    const toggleDNSSEC = document.getElementById("toggleDNSSEC");
+    const toggleCAA = document.getElementById("toggleCAA");
+    const toggleMPIC = document.getElementById("toggleMPIC");
+
+    function enabledChecks() {
+      return {
+        health: !!toggleHealth.checked,
+        dnssec: !!toggleDNSSEC.checked,
+        caa: !!toggleCAA.checked,
+        mpic: !!toggleMPIC.checked,
+        other: true, // keep “Other” always visible; change to a toggle if you want
+      };
+    }
 
   function esc(s) {
     return String(s ?? "")
@@ -400,16 +447,27 @@
       recommendation: rec
     };
   }
-
   function categoryForFinding(f) {
-    const hay = `${f.check} ${f.issue} ${f.title}`.toLowerCase();
+    const check = String(f.check || "").toLowerCase();
+    const issue = String(f.issue || "").toLowerCase();
+    const title = String(f.title || "").toLowerCase();
+    const hay = `${check} ${issue} ${title}`;
+
+    if (check === "dns_health" || hay.includes("dns_health") || hay.includes("health")) return "health";
     if (hay.includes("dnssec")) return "dnssec";
     if (hay.includes("caa")) return "caa";
     if (hay.includes("mpic")) return "mpic";
+
     return "other";
   }
 
+
   function passesFilters(f) {
+    // NEW: exclude disabled categories from search/filter/render/checklist
+    const cat = categoryForFinding(f);
+    const en = enabledChecks();
+    if (!en[cat]) return false;
+
     const sev = severityFilter.value;
     if (sev !== "all" && f.severity !== sev) return false;
 
@@ -419,6 +477,7 @@
     const hay = `${f.check} ${f.issue} ${f.title} ${f.detail} ${f.recommendation}`.toLowerCase();
     return hay.includes(q);
   }
+
 
   function groupByCheck(findings) {
     const groups = new Map();
@@ -448,6 +507,23 @@
       if (typeof s[k] === "number") pills.push(pill(k, s[k]));
     }
     severityPills.innerHTML = pills.join("");
+  }
+
+  function renderHealthInline(checks) {
+    const h = (checks && checks.dns_health) ? checks.dns_health : null;
+    if (!h) return `<p class="muted">(No DNS health data.)</p>`;
+
+    const overall = (h.overall || "unknown").toLowerCase();
+    const ns = Array.isArray(h.nameservers) ? h.nameservers : [];
+
+    const overallOk = (overall === "ok");
+    const overallLine = `<p><strong>Overall:</strong> ${badge(overall, overallOk)}</p>`;
+
+    const nsLine = ns.length
+      ? `<p class="muted"><strong>Delegated NS:</strong> ${ns.map(x => `<code>${esc(x)}</code>`).join(" ")}</p>`
+      : `<p class="muted">(No delegated NS returned.)</p>`;
+
+    return overallLine + nsLine;
   }
 
   function renderCAAInline(checks) {
@@ -599,8 +675,7 @@
       fixHint.textContent = "(No actionable recommendations returned.)";
       return;
     }
-
-    const order = { dnssec: 0, caa: 1, mpic: 2, other: 3 };
+    const order = { health: 0, dnssec: 1, caa: 2, mpic: 3, other: 4 };
     const byCat = new Map();
 
     for (const f of actionable) {
@@ -641,18 +716,24 @@
   function rerender() {
     const filtered = lastFindings.filter(passesFilters);
 
+    const health = filtered.filter(f => categoryForFinding(f) === "health");
     const dnssec = filtered.filter(f => categoryForFinding(f) === "dnssec");
     const caa = filtered.filter(f => categoryForFinding(f) === "caa");
     const mpic = filtered.filter(f => categoryForFinding(f) === "mpic");
     const other = filtered.filter(f => categoryForFinding(f) === "other");
 
-    renderCategorySection(dnssecSection, "DNSSEC", dnssec, "");
-    renderCategorySection(caaSection, "CAA", caa, renderCAAInline(lastChecks));
-    renderCategorySection(mpicSection, "MPIC", mpic, renderMPICInline(lastChecks));
+    const en = enabledChecks();
+
+    // Requested order: Health, DNSSEC, CAA, MPIC
+    renderCategorySection(healthSection, "DNS Health", en.health ? health : [], en.health ? renderHealthInline(lastChecks) : "");
+    renderCategorySection(dnssecSection, "DNSSEC", en.dnssec ? dnssec : [], "");
+    renderCategorySection(caaSection, "CAA", en.caa ? caa : [], en.caa ? renderCAAInline(lastChecks) : "");
+    renderCategorySection(mpicSection, "MPIC", en.mpic ? mpic : [], en.mpic ? renderMPICInline(lastChecks) : "");
+
     renderCategorySection(otherSection, "Other", other, "");
 
-    // Checklist always based on all findings (not filtered)
-    buildWhatToFixChecklist(lastFindings);
+    // Checklist should also respect toggles
+    buildWhatToFixChecklist(lastFindings.filter(passesFilters));
   }
 
   searchBox.addEventListener("input", rerender);
@@ -668,6 +749,10 @@
       fixList.select();
     }
   });
+  toggleHealth.addEventListener("change", rerender);
+  toggleDNSSEC.addEventListener("change", rerender);
+  toggleCAA.addEventListener("change", rerender);
+  toggleMPIC.addEventListener("change", rerender);
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
