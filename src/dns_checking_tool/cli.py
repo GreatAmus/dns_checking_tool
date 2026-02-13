@@ -2,11 +2,12 @@
 import argparse
 import json
 from typing import Any, Dict, List
+from reporting.assembler import Assemble
+from dnssec.tool import DNSSECTool
+from mpic.mpic import MPICChecker
+from caa.caa import CAAChecker
+from reporting.targets import *
 
-from assembler import Assemble
-from dnssec_tool import DNSSECTool
-from src.mpic.mpic import MPICChecker
-from caa import CAAChecker
 
 """
 The command-line interface for the DNS Checker (DNSSEC + MPIC + CAA)

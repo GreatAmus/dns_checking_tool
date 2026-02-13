@@ -3,9 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Tuple
-
-from ca_resolver import DNSQueryResult  # make sure this import matches your project
-
+from .ca_resolver import DNSQueryResult
 
 DIGICERT_ALLOWED_CAA_VALUES = {
     "www.digicert.com",
@@ -139,7 +137,7 @@ class CAAChecker:
         z = self._normalize_name(zone)
         labels = [x for x in z.split(".") if x]
 
-        last_qr = DNSQueryResult(qname=z + ".", qtype="CAA", rcode="unknown", answers=[], validated=False)
+        last_qr = DNSQueryResult(qname=z + ".", qtype="CAA", rcode="unknown", answers=[], ttl_min=None, flags={}, validated=False)
 
         # If validation fails, we capture what we observed with CD=1
         observed_unvalidated = False

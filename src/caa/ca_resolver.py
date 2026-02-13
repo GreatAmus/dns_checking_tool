@@ -44,13 +44,11 @@ class UnboundValidatingResolver:
         ip: str = "127.0.0.1",
         port: int = 5053,
         timeout: float = 2.0,
-        lifetime: float = 2.0,
         use_tcp: bool = False,
     ) -> None:
         self.ip = ip
         self.port = port
         self.timeout = timeout
-        self.lifetime = lifetime
         self.use_tcp = use_tcp
 
     def query(self, qname: str, qtype: str, *, checking_disabled: bool = False) -> DNSQueryResult:
@@ -67,13 +65,9 @@ class UnboundValidatingResolver:
 
         try:
             if self.use_tcp:
-                resp = dns.query.tcp(
-                    msg, self.ip, port=self.port, timeout=self.timeout, lifetime=self.lifetime
-                )
+                resp = dns.query.tcp(msg, self.ip, port=self.port, timeout=self.timeout)
             else:
-                resp = dns.query.udp(
-                    msg, self.ip, port=self.port, timeout=self.timeout, lifetime=self.lifetime
-                )
+                resp = dns.query.udp(msg, self.ip, port=self.port, timeout=self.timeout)
 
             rcode_text = dns.rcode.to_text(resp.rcode())
 

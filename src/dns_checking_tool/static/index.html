@@ -5,32 +5,236 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DNS Settings Checker</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+
   <style>
-    .ok { color: #0a7; font-weight: 700; }
-    .bad { color: #b00020; font-weight: 700; }
-    .muted { opacity: .8; font-size: .95em; }
-    pre { max-height: 40vh; overflow: auto; margin: 0; }
-    table td, table th { vertical-align: top; }
-    code { font-size: 0.9em; }
-    .pill {
-      display: inline-block;
-      padding: .15rem .5rem;
-      border: 1px solid rgba(0,0,0,.15);
+    :root{
+      /* Softer, cleaner look */
+      --card-border: rgba(0,0,0,.12);
+      --muted: rgba(0,0,0,.72);
+      --muted-2: rgba(0,0,0,.58);
+      --surface-1: #ffffff;
+      --surface-2: rgba(0,0,0,.015);
+      --pill-bg: rgba(0,0,0,.02);
+
+      --ok: #0a7;
+      --bad: #b00020;
+      --warn: #b45309;
+    }
+
+    body{ font-size: 16px; line-height: 1.45; }
+    main.container{ max-width: 1020px; }
+    h1{ font-size: 1.9rem; margin-bottom: .25rem; }
+    h2{ font-size: 1.25rem; margin: 0; }
+    h3{ font-size: 1.05rem; margin: 0; }
+
+    .muted{ color: var(--muted); opacity: 1; font-size: .95em; }
+    .ok{ color: var(--ok); font-weight: 800; }
+    .bad{ color: var(--bad); font-weight: 800; }
+    .warn{ color: var(--warn); font-weight: 800; }
+
+    /* Layout wrappers to reduce nested “box inside box” */
+    .block{
+      margin: 1.25rem 0;
+      padding-top: .25rem;
+    }
+    .block-head{
+      display:flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: .75rem;
+      flex-wrap: wrap;
+      margin-bottom: .75rem;
+    }
+    .rule{ height: 1px; background: rgba(0,0,0,.08); margin: .5rem 0 0 0; }
+
+    /* Summary as a flat grid (no big box) */
+    .summary-grid{
+      display:grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: .75rem;
+      margin-top: .75rem;
+    }
+    .summary-card{
+      grid-column: span 4;
+      border: 1px solid rgba(0,0,0,.10);
+      border-radius: 14px;
+      padding: .85rem .9rem;
+      background: var(--surface-1);
+    }
+    @media (max-width: 900px){
+      .summary-card{ grid-column: span 12; }
+    }
+    .summary-label{ color: var(--muted-2); font-weight: 700; font-size: .85em; }
+    .summary-value{ margin-top: .25rem; font-weight: 900; font-size: 1.05em; }
+    .summary-sub{ margin-top: .35rem; color: var(--muted); font-size: .9em; }
+
+    /* Severity pills */
+    .pills{ margin-top: .6rem; }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:.35rem;
+      padding: .12rem .48rem;
+      border: 1px solid rgba(0,0,0,.12);
       border-radius: 999px;
-      font-size: .85em;
+      font-size: .82em;
       margin-right: .35rem;
       margin-bottom: .35rem;
-      background: rgba(0,0,0,.03);
+      background: var(--pill-bg);
+      white-space: nowrap;
+      color: rgba(0,0,0,.78);
     }
-    details > summary { cursor: pointer; }
+    .pill strong{ font-weight: 800; color: rgba(0,0,0,.86); }
+    .pill .count{ font-weight: 900; }
+
+    /* Toolbar */
+    .toolbar{
+      display:grid;
+      grid-template-columns: 1fr 220px;
+      gap: .75rem;
+      align-items: end;
+      margin: .75rem 0 1rem 0;
+    }
+    @media (max-width: 900px){ .toolbar{ grid-template-columns: 1fr; } }
+
+    /* Finding cards */
+    details > summary{ cursor: pointer; }
+    .finding{
+      border: 1px solid rgba(0,0,0,.10);
+      border-radius: 14px;
+      padding: .75rem .9rem;
+      margin: .6rem 0;
+      background: var(--surface-1);
+    }
+    .finding summary{
+      list-style:none;
+      display:grid;
+      grid-template-columns: 96px 1fr;
+      gap: .8rem;
+      align-items: start;
+    }
+    .finding summary::-webkit-details-marker{ display:none; }
+
+    .sev{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding: .14rem .55rem;
+      border-radius: 999px;
+      border: 1px solid rgba(0,0,0,.14);
+      font-size: .82em;
+      font-weight: 800;
+      text-transform: lowercase;
+      background: transparent;
+    }
+    .sev.high, .sev.medium{ color: var(--bad); border-color: rgba(176,0,32,.22); }
+    .sev.low{ color: var(--warn); border-color: rgba(180,83,9,.22); }
+    .sev.info{ color: var(--ok); border-color: rgba(0,170,119,.22); }
+    .sev.unknown{ opacity: .75; }
+
+    .finding-title{ font-weight: 900; margin: 0; line-height: 1.25; font-size: 1rem; }
+    .finding-meta{
+      margin-top: .2rem;
+      display:flex;
+      flex-wrap: wrap;
+      gap: .4rem;
+      align-items:center;
+    }
+
+    /* Key/value rows */
+    .kvs{
+      display:grid;
+      grid-template-columns: 230px 1fr;
+      gap: .35rem .75rem;
+      margin-top: .7rem;
+    }
+    @media (max-width: 700px){ .kvs{ grid-template-columns: 1fr; } }
+    .kvs .key{ font-weight: 800; color: var(--muted-2); }
+
+    /* WRAP FIXES + softer blocks */
+    pre{
+      max-height: 34vh;
+      overflow:auto;
+      margin: .5rem 0 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+
+      background: rgba(0,0,0,.02);
+      border: 1px solid rgba(0,0,0,.08);
+      border-radius: 12px;
+      padding: .75rem .85rem;
+      font-size: .92em;
+      line-height: 1.35;
+    }
+    table td, table th{
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+    code{
+      font-size: .9em;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      background: rgba(0,0,0,.04);
+      border: 1px solid rgba(0,0,0,.08);
+      border-radius: 8px;
+      padding: .05rem .3rem;
+    }
+
+    /* “What to fix” */
+    .fixbox{
+      display:grid;
+      gap: .75rem;
+      grid-template-columns: 1fr 160px;
+      align-items: start;
+      margin-top: .5rem;
+    }
+    @media (max-width: 800px){ .fixbox{ grid-template-columns: 1fr; } }
+
+    textarea{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      white-space: pre;
+      overflow-wrap: normal;
+      font-size: .92em;
+      line-height: 1.35;
+      background: #fff;
+      border: 1px solid rgba(0,0,0,.12);
+      border-radius: 12px;
+    }
+
+    /* New: “fix items” with extra context */
+    .fix-hint{
+      margin-top: .5rem;
+      color: var(--muted);
+      font-size: .92em;
+    }
+
+    /* Raw JSON affordance */
+    details.raw summary{
+      display:inline-flex;
+      align-items:center;
+      gap: .5rem;
+      padding: .35rem .6rem;
+      border: 1px solid rgba(0,0,0,.12);
+      border-radius: 10px;
+      background: rgba(0,0,0,.02);
+      font-weight: 800;
+      user-select:none;
+      font-size: .92em;
+    }
+    details.raw summary:hover{ background: rgba(0,0,0,.04); }
+
+    /* Status */
+    #status p{ margin: .5rem 0; }
   </style>
 </head>
+
 <body>
 <main class="container">
   <h1>DNS Settings Checker</h1>
-  <p class="muted">
-    Enter a domain/zone (e.g., <code>example.com</code>). You’ll get scan results and recommendations.
-  </p>
+  <p class="muted">Enter a domain/zone (e.g., <code>example.com</code>) and run the checks.</p>
 
   <form id="form">
     <label>
@@ -43,28 +247,87 @@
   <div id="status"></div>
 
   <section id="results" style="display:none;">
-    <h2>Summary</h2>
-    <p><strong>Zone:</strong> <span id="zoneOut"></span></p>
-    <p><strong>Score:</strong> <span id="scoreOut"></span></p>
-    <p><strong>Issues:</strong> <span id="issuesOut"></span></p>
+    <!-- SUMMARY (no big outer card) -->
+    <div class="block" id="summaryBlock">
+      <div class="block-head">
+        <h2>Summary</h2>
+        <div class="muted" id="summaryTagline"></div>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-card">
+          <div class="summary-label">Zone</div>
+          <div class="summary-value" id="zoneOut"></div>
+          <div class="summary-sub">The exact name checked (after normalization).</div>
+        </div>
 
-    <div id="severityPills"></div>
+        <div class="summary-card">
+          <div class="summary-label">Score</div>
+          <div class="summary-value" id="scoreOut"></div>
+          <div class="summary-sub">Higher is better. Aim for 85+.</div>
+        </div>
 
-    <h2>Findings</h2>
-    <div id="findingsOut"></div>
+        <div class="summary-card">
+          <div class="summary-label">Issues</div>
+          <div class="summary-value" id="issuesOut"></div>
+          <div class="summary-sub">Total findings returned by all checks.</div>
+        </div>
+      </div>
 
-    <h2>Recommendations</h2>
-    <p class="muted">Action items inferred from the findings.</p>
-    <div id="recsOut"></div>
+      <div class="pills" id="severityPills"></div>
+      <div class="rule"></div>
+    </div>
 
-    <h2>CAA</h2>
-    <div id="caaOut"></div>
+    <!-- FINDINGS (no big nested boxes; just headings + cards) -->
+    <div class="block">
+      <div class="block-head">
+        <h2>Findings</h2>
+        <div class="muted">Filter by severity or search within titles/details.</div>
+      </div>
 
-    <h2>MPIC (multi-perspective)</h2>
-    <p><strong>Risk:</strong> <span id="mpicRisk"></span> <span id="mpicMeta"></span></p>
-    <div id="mpicOut"></div>
+      <div class="toolbar">
+        <label style="margin:0;">
+          Search (title/detail/issue)
+          <input id="searchBox" placeholder="e.g. CAA, DNSSEC, timeout…" />
+        </label>
 
-    <details>
+        <label style="margin:0;">
+          Severity
+          <select id="severityFilter">
+            <option value="all">All</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="info">Info</option>
+            <option value="unknown">Unknown</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="dnssecSection"></div>
+      <div id="caaSection"></div>
+      <div id="mpicSection"></div>
+      <div id="otherSection"></div>
+
+      <div class="rule"></div>
+    </div>
+
+    <!-- WHAT TO FIX (more descriptive) -->
+    <div class="block">
+      <div class="block-head">
+        <h2>What to fix</h2>
+        <div class="muted">A prioritized, copy/paste checklist with context.</div>
+      </div>
+
+      <div class="fixbox">
+        <textarea id="fixList" rows="12" readonly></textarea>
+        <button id="copyFix" type="button">Copy</button>
+      </div>
+      <div class="fix-hint" id="fixHint"></div>
+
+      <div class="rule"></div>
+    </div>
+
+    <details class="raw">
       <summary>Show raw response JSON</summary>
       <pre id="rawOut">{}</pre>
     </details>
@@ -81,17 +344,26 @@
   const scoreOut = document.getElementById("scoreOut");
   const issuesOut = document.getElementById("issuesOut");
   const severityPills = document.getElementById("severityPills");
-
-  const findingsOut = document.getElementById("findingsOut");
-  const recsOut = document.getElementById("recsOut");
-
-  const caaOut = document.getElementById("caaOut");
-
-  const mpicRisk = document.getElementById("mpicRisk");
-  const mpicMeta = document.getElementById("mpicMeta");
-  const mpicOut = document.getElementById("mpicOut");
+  const summaryTagline = document.getElementById("summaryTagline");
 
   const rawOut = document.getElementById("rawOut");
+
+  const searchBox = document.getElementById("searchBox");
+  const severityFilter = document.getElementById("severityFilter");
+
+  const dnssecSection = document.getElementById("dnssecSection");
+  const caaSection = document.getElementById("caaSection");
+  const mpicSection = document.getElementById("mpicSection");
+  const otherSection = document.getElementById("otherSection");
+
+  const fixList = document.getElementById("fixList");
+  const copyFix = document.getElementById("copyFix");
+  const fixHint = document.getElementById("fixHint");
+
+  const NO_REC_SENTINEL = "No recommendation available for this issue yet.";
+
+  let lastFindings = [];
+  let lastChecks = {};
 
   function esc(s) {
     return String(s ?? "")
@@ -105,76 +377,58 @@
   }
 
   function pill(label, value) {
-    return `<span class="pill"><strong>${esc(label)}:</strong> ${esc(value)}</span>`;
+    return `<span class="pill"><strong>${esc(label)}:</strong> <span class="count">${esc(value)}</span></span>`;
   }
 
-  function uniqueNonEmpty(arr) {
-    const out = [];
-    const seen = new Set();
-    for (const x of arr) {
-      const v = String(x ?? "").trim();
-      if (!v) continue;
-      const k = v.toLowerCase();
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(v);
-    }
-    return out;
+  function sevClass(sev) {
+    sev = String(sev || "unknown").toLowerCase();
+    return ["high","medium","low","info","unknown"].includes(sev) ? sev : "unknown";
   }
 
-  function severityOk(sev) {
-    sev = String(sev || "").toLowerCase();
-    return sev === "info" || sev === "low";
+  function normalizeFinding(f, idx) {
+    const check = f.check || "";
+    const issue = f.issue || "";
+    const title = f.title || "";
+    const detail = f.detail || "";
+    const recRaw = (f.recommendation || "").trim();
+    const rec = (recRaw && recRaw !== NO_REC_SENTINEL) ? recRaw : "";
+    const severity = sevClass(f.severity);
+
+    return {
+      id: `finding-${idx}`,
+      check, issue, title, detail, severity,
+      recommendation: rec
+    };
   }
 
-  function renderFindings(findings) {
-    if (!Array.isArray(findings) || !findings.length) {
-      findingsOut.innerHTML = `<p class="ok">No findings reported.</p>`;
-      return;
-    }
+  function categoryForFinding(f) {
+    const hay = `${f.check} ${f.issue} ${f.title}`.toLowerCase();
+    if (hay.includes("dnssec")) return "dnssec";
+    if (hay.includes("caa")) return "caa";
+    if (hay.includes("mpic")) return "mpic";
+    return "other";
+  }
 
-    let html = `
-      <table>
-        <thead><tr>
-          <th>Severity</th>
-          <th>Check</th>
-          <th>Issue</th>
-          <th>Title</th>
-          <th>Detail</th>
-          <th>Recommendation</th>
-        </tr></thead>
-        <tbody>
-    `;
+  function passesFilters(f) {
+    const sev = severityFilter.value;
+    if (sev !== "all" && f.severity !== sev) return false;
 
+    const q = (searchBox.value || "").trim().toLowerCase();
+    if (!q) return true;
+
+    const hay = `${f.check} ${f.issue} ${f.title} ${f.detail} ${f.recommendation}`.toLowerCase();
+    return hay.includes(q);
+  }
+
+  function groupByCheck(findings) {
+    const groups = new Map();
     for (const f of findings) {
-      const sev = (f.severity || "unknown").toLowerCase();
-      html += `
-        <tr>
-          <td>${badge(sev, severityOk(sev))}</td>
-          <td><code>${esc(f.check || "")}</code></td>
-          <td><code>${esc(f.issue || "")}</code></td>
-          <td>${esc(f.title || "")}</td>
-          <td><pre>${esc(f.detail || "")}</pre></td>
-          <td><pre>${esc(f.recommendation || "")}</pre></td>
-        </tr>
-      `;
+      const key = (f.check || "unknown");
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(f);
     }
-
-    html += `</tbody></table>`;
-    findingsOut.innerHTML = html;
-  }
-
-  function renderRecommendations(findings) {
-    const recs = uniqueNonEmpty((findings || []).map(f => f.recommendation));
-    if (!recs.length) {
-      recsOut.innerHTML = `<p class="muted">(No recommendations.)</p>`;
-      return;
-    }
-    recsOut.innerHTML = `
-      <ul>
-        ${recs.map(r => `<li>${esc(r)}</li>`).join("")}
-      </ul>
-    `;
+    const keys = Array.from(groups.keys()).sort((a,b) => String(a).localeCompare(String(b)));
+    return keys.map(k => [k, groups.get(k)]);
   }
 
   function renderSummary(summary) {
@@ -185,162 +439,252 @@
     scoreOut.innerHTML = score === null ? badge("unknown", false) : badge(String(score), score >= 85);
     issuesOut.textContent = issues === null ? "unknown" : String(issues);
 
+    // Quick tagline without another box
+    const fail = (s.high || 0) > 0 || (s.medium || 0) > 0;
+    summaryTagline.innerHTML = fail
+      ? `<span class="bad">FAIL</span> — address high/medium findings first.`
+      : `<span class="ok">PASS</span> — no high/medium findings.`;
+
     const pills = [];
-    for (const k of ["high", "medium", "low", "info", "unknown"]) {
+    for (const k of ["high","medium","low","info","unknown"]) {
       if (typeof s[k] === "number") pills.push(pill(k, s[k]));
     }
     severityPills.innerHTML = pills.join("");
   }
 
-  function renderCAA(checks) {
+  function renderCAAInline(checks) {
     const caa = (checks && checks.caa) ? checks.caa : null;
-    if (!caa) {
-      caaOut.innerHTML = `<p class="muted">(No CAA data.)</p>`;
-      return;
-    }
+    if (!caa) return `<p class="muted">(No CAA data.)</p>`;
 
+    const records = Array.isArray(caa.records) ? caa.records : [];
     const eff = caa.effective_domain || "";
     const inherited = !!caa.inherited;
-    const records = Array.isArray(caa.records) ? caa.records : [];
 
-    // Policy signals (these keys come from caa.py)
     const allowsAny = (caa.allows_any_issuance !== false);
     const allowsWild = (caa.allows_wildcards !== false);
     const allowsDcNon = (caa.allows_digicert_nonwild !== false);
     const allowsDcWild = (caa.allows_digicert_wild !== false);
 
-    const header = records.length
-      ? `<p><strong>Effective at:</strong> <code>${esc(eff)}</code> ${inherited ? `<span class="pill">inherited</span>` : ""}</p>`
-      : `<p class="muted">No CAA records found (not restricted by CAA).</p>`;
+    const recordLine = records.length
+      ? `<p><strong>CAA record(s):</strong> ${records.map(r => `<code>${esc(r)}</code>`).join(" ")}</p>`
+      : `<p class="muted">No CAA records found (zone not restricted by CAA).</p>`;
 
-    const pills = `
-      <div>
+    const effLine = records.length
+      ? `<p class="muted"><strong>Effective at:</strong> <code>${esc(eff)}</code> ${inherited ? `<span class="pill"><strong>inherited</strong> yes</span>` : ""}</p>`
+      : "";
+
+    const evalPills = `
+      <div class="pills">
         ${pill("issuance", allowsAny ? "allowed" : "blocked")}
         ${pill("wildcards", allowsWild ? "allowed" : "blocked")}
-        ${pill("DigiCert (non-wild)", allowsDcNon ? "allowed" : "not allowed")}
-        ${pill("DigiCert (wild)", allowsDcWild ? "allowed" : "not allowed")}
+        ${pill("DigiCert non-wild", allowsDcNon ? "allowed" : "not allowed")}
+        ${pill("DigiCert wild", allowsDcWild ? "allowed" : "not allowed")}
       </div>
     `;
 
-    let recTable = "";
-    if (records.length) {
-      recTable = `
-        <details open>
-          <summary>Show CAA records</summary>
-          <table>
-            <thead><tr>
-              <th>Record</th>
-            </tr></thead>
-            <tbody>
-              ${records.map(r => `<tr><td><code>${esc(r)}</code></td></tr>`).join("")}
-            </tbody>
-          </table>
-        </details>
-      `;
-    }
-
-    // Optional: show parsed entries nicely if present
-    const parsed = Array.isArray(caa.parsed) ? caa.parsed : [];
-    let parsedTable = "";
-    if (parsed.length) {
-      parsedTable = `
-        <details>
-          <summary>Show parsed CAA entries</summary>
-          <table>
-            <thead><tr>
-              <th>Flag</th>
-              <th>Tag</th>
-              <th>Value</th>
-            </tr></thead>
-            <tbody>
-              ${parsed.map(p => `
-                <tr>
-                  <td><code>${esc(p.flag)}</code></td>
-                  <td><code>${esc(p.tag)}</code></td>
-                  <td><code>${esc(p.value)}</code></td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </details>
-      `;
-    }
-
-    caaOut.innerHTML = header + pills + recTable + parsedTable;
+    return recordLine + effLine + evalPills;
   }
 
-  function renderMPIC(checks) {
+  function renderMPICInline(checks) {
     const mp = (checks && checks.mpic) ? checks.mpic : null;
-    if (!mp) {
-      mpicRisk.innerHTML = badge("not run", false);
-      mpicMeta.textContent = "";
-      mpicOut.innerHTML = `<p class="muted">(No MPIC data.)</p>`;
-      return;
-    }
+    if (!mp) return `<p class="muted">(No MPIC data.)</p>`;
 
     const level = mp.risk_level || "unknown";
     const score = (typeof mp.risk_score === "number") ? mp.risk_score : null;
 
-    mpicRisk.innerHTML = badge(level, level === "low");
-    mpicMeta.textContent = score === null ? "" : `(score ${score})`;
-
-    const queries = Array.isArray(mp.queries) ? mp.queries : [];
-    const divergent = queries.filter(q => q && q.consistent === false);
-
-    if (!queries.length) {
-      mpicOut.innerHTML = `<p class="muted">(No MPIC queries returned.)</p>`;
-      return;
-    }
-
-    let html = "";
-    if (divergent.length) {
-      html += `<p class="bad"><strong>Divergence detected</strong> on ${divergent.length} query(s).</p>`;
-    } else {
-      html += `<p class="ok"><strong>No divergence</strong> detected across perspectives.</p>`;
-    }
-
-    html += `
-      <details ${divergent.length ? "open" : ""}>
-        <summary>Show MPIC query details</summary>
-        <table>
-          <thead><tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Consistent</th>
-            <th>Divergent</th>
-          </tr></thead>
-          <tbody>
+    const header = `
+      <p><strong>Risk:</strong> ${badge(level, level === "low")}
+      ${score === null ? "" : `<span class="muted">(score ${esc(score)})</span>`}</p>
     `;
 
+    const queries = Array.isArray(mp.queries) ? mp.queries : [];
+    if (!queries.length) return header + `<p class="muted">(No MPIC queries returned.)</p>`;
+
+    const divergent = queries.filter(q => q && q.consistent === false);
+    const top = divergent.length
+      ? `<p class="bad"><strong>Divergence detected</strong> on ${divergent.length} query(s).</p>`
+      : `<p class="ok"><strong>No divergence</strong> across perspectives.</p>`;
+
+    let rows = "";
     for (const q of queries) {
       const consistent = q.consistent === true;
       const divP = Array.isArray(q.divergent_perspectives) ? q.divergent_perspectives : [];
-      html += `
+      rows += `
         <tr>
           <td><code>${esc(q.qname || "")}</code></td>
           <td><code>${esc(q.qtype || "")}</code></td>
           <td>${badge(consistent ? "yes" : "no", consistent)}</td>
-          <td>${divP.length ? divP.map(p => `<span class="pill">${esc(p)}</span>`).join("") : ""}</td>
+          <td>${divP.length ? divP.map(p => `<span class="pill"><strong>p</strong> ${esc(p)}</span>`).join("") : ""}</td>
         </tr>
       `;
     }
 
-    html += `</tbody></table></details>`;
-    mpicOut.innerHTML = html;
+    return header + top + `
+      <details ${divergent.length ? "open" : ""}>
+        <summary>Show MPIC query details</summary>
+        <table>
+          <thead><tr>
+            <th>Name</th><th>Type</th><th>Consistent</th><th>Divergent</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </details>
+    `;
   }
+
+  function renderCategorySection(container, title, findings, extraHtml) {
+    if (!findings.length && !extraHtml) {
+      container.innerHTML = "";
+      return;
+    }
+
+    const groups = groupByCheck(findings);
+
+    let html = `
+      <div style="margin-top:1.25rem;">
+        <div style="display:flex; align-items:baseline; justify-content:space-between; gap:.75rem; flex-wrap:wrap;">
+          <h3>${esc(title)}</h3>
+          <span class="pill"><strong>findings</strong> <span class="count">${esc(findings.length)}</span></span>
+        </div>
+        ${extraHtml ? `<div style="margin:.35rem 0 .85rem 0;">${extraHtml}</div>` : ""}
+    `;
+
+    if (!groups.length) {
+      html += `<p class="muted">(No findings in this section.)</p>`;
+    } else {
+      for (const [checkName, items] of groups) {
+        html += `<p class="muted" style="margin: .75rem 0 .25rem 0;"><strong>Check:</strong> <code>${esc(checkName)}</code></p>`;
+
+        for (const f of items) {
+          const titleText = (f.title && f.title.trim()) ? f.title : (f.issue ? f.issue : "(no title)");
+          const issuePill = f.issue ? `<span class="pill"><strong>issue</strong>: <code>${esc(f.issue)}</code></span>` : "";
+          const recBlock = f.recommendation
+            ? `<pre>${esc(f.recommendation)}</pre>`
+            : `<p class="muted">(No recommendation yet)</p>`;
+
+          html += `
+            <details class="finding" id="${esc(f.id)}" open>
+              <summary>
+                <span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>
+                <div>
+                  <p class="finding-title">${esc(titleText)}</p>
+                  <div class="finding-meta">${issuePill}</div>
+                </div>
+              </summary>
+
+              <div class="kvs">
+                <div class="key">Detail</div>
+                <div>${f.detail ? `<pre>${esc(f.detail)}</pre>` : `<span class="muted">(none)</span>`}</div>
+
+                <div class="key">Recommendation</div>
+                <div>${recBlock}</div>
+              </div>
+            </details>
+          `;
+        }
+      }
+    }
+
+    html += `</div>`;
+    container.innerHTML = html;
+  }
+
+  function buildWhatToFixChecklist(findingsAll) {
+    // More descriptive checklist:
+    // - group by category
+    // - include issue + check name
+    // - include 1-line “why it matters” extracted from title/detail when possible
+
+    const actionable = findingsAll.filter(f => f.recommendation && f.recommendation.trim());
+    if (!actionable.length) {
+      fixList.value = "";
+      fixHint.textContent = "(No actionable recommendations returned.)";
+      return;
+    }
+
+    const order = { dnssec: 0, caa: 1, mpic: 2, other: 3 };
+    const byCat = new Map();
+
+    for (const f of actionable) {
+      const cat = categoryForFinding(f);
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push(f);
+    }
+
+    const cats = Array.from(byCat.keys()).sort((a,b) => (order[a] ?? 9) - (order[b] ?? 9));
+    const lines = [];
+
+    for (const cat of cats) {
+      const items = byCat.get(cat) || [];
+      items.sort((a,b) => String(a.check).localeCompare(String(b.check)));
+
+      lines.push(`## ${cat.toUpperCase()}`);
+      for (const f of items) {
+        const titleText = (f.title && f.title.trim()) ? f.title : (f.issue ? f.issue : "(no title)");
+        const check = f.check ? f.check : "unknown-check";
+        const issue = f.issue ? f.issue : "unknown-issue";
+
+        // Tiny “context” line: pull first sentence-ish from detail if present
+        const context = (f.detail || "").trim().split(/\n+/)[0].slice(0, 140);
+        const ctxLine = context ? `\n    - Context: ${context}${context.length >= 140 ? "…" : ""}` : "";
+
+        lines.push(`- [ ] ${titleText}`);
+        lines.push(`    - Check: ${check}`);
+        lines.push(`    - Issue: ${issue}`);
+        lines.push(`    - Fix: ${f.recommendation.trim()}${ctxLine}`);
+      }
+      lines.push(""); // spacer
+    }
+
+    fixList.value = lines.join("\n").trim();
+    fixHint.textContent = "Tip: items are grouped by area (DNSSEC/CAA/MPIC/Other) and include check + issue for quick triage.";
+  }
+
+  function rerender() {
+    const filtered = lastFindings.filter(passesFilters);
+
+    const dnssec = filtered.filter(f => categoryForFinding(f) === "dnssec");
+    const caa = filtered.filter(f => categoryForFinding(f) === "caa");
+    const mpic = filtered.filter(f => categoryForFinding(f) === "mpic");
+    const other = filtered.filter(f => categoryForFinding(f) === "other");
+
+    renderCategorySection(dnssecSection, "DNSSEC", dnssec, "");
+    renderCategorySection(caaSection, "CAA", caa, renderCAAInline(lastChecks));
+    renderCategorySection(mpicSection, "MPIC", mpic, renderMPICInline(lastChecks));
+    renderCategorySection(otherSection, "Other", other, "");
+
+    // Checklist always based on all findings (not filtered)
+    buildWhatToFixChecklist(lastFindings);
+  }
+
+  searchBox.addEventListener("input", rerender);
+  severityFilter.addEventListener("change", rerender);
+
+  copyFix.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(fixList.value || "");
+      copyFix.textContent = "Copied";
+      setTimeout(() => copyFix.textContent = "Copy", 1200);
+    } catch (e) {
+      fixList.focus();
+      fixList.select();
+    }
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     status.innerHTML = "Checking…";
     results.style.display = "none";
-    findingsOut.innerHTML = "";
-    recsOut.innerHTML = "";
+
+    dnssecSection.innerHTML = "";
+    caaSection.innerHTML = "";
+    mpicSection.innerHTML = "";
+    otherSection.innerHTML = "";
     severityPills.innerHTML = "";
-    caaOut.innerHTML = "";
-    mpicOut.innerHTML = "";
-    mpicRisk.textContent = "";
-    mpicMeta.textContent = "";
+    fixList.value = "";
+    fixHint.textContent = "";
     rawOut.textContent = "{}";
+    summaryTagline.textContent = "";
 
     const zone = zoneInput.value.trim().replace(/\.$/, "");
     try {
@@ -352,22 +696,18 @@
       }
 
       const data = await res.json();
-
       rawOut.textContent = JSON.stringify(data, null, 2);
 
       zoneOut.textContent = data.target || zone;
       renderSummary(data.summary);
 
-      const findings = Array.isArray(data.findings) ? data.findings : [];
-      renderFindings(findings);
-      renderRecommendations(findings);
+      const findingsRaw = Array.isArray(data.findings) ? data.findings : [];
+      lastFindings = findingsRaw.map(normalizeFinding);
 
-      // NEW: CAA section (from checks.caa)
-      renderCAA(data.checks);
+      lastChecks = data.checks || {};
+      rerender();
 
-      // MPIC section (from checks.mpic)
-      renderMPIC(data.checks);
-
+      // Keep status simple
       const s = data.summary || {};
       const fail = (s.high || 0) > 0 || (s.medium || 0) > 0;
       status.innerHTML = fail
