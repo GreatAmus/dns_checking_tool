@@ -1,2 +1,0 @@
-[console_scripts]
-dns-check = dns_checking_tool.cli:main
